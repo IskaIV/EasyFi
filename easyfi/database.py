@@ -13,7 +13,7 @@ from .calculations import ShiftCalculation, calculate_shift, work_week_bounds
 from .paths import database_path
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +55,38 @@ class ShiftRecord:
     overtime_after_minutes: int
     overtime_multiplier_milli: int
     notes: str
+
+
+@dataclass(frozen=True, slots=True)
+class PaymentToSave:
+    income_source_id: int
+    paid_on: date
+    work_week_reference_date: date
+    amount_cents: int
+    notes: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class PaymentRecord:
+    id: int
+    income_source_id: int
+    source_name: str
+    paid_on: date
+    work_week_start: date
+    work_week_reference_date: date
+    amount_cents: int
+    notes: str
+
+
+@dataclass(frozen=True, slots=True)
+class PaymentSummary:
+    income_source_id: int
+    week_start: date
+    week_end: date
+    gross_earned_cents: int
+    payments_received_cents: int
+    amount_owed_cents: int
+    overpaid_cents: int
 
 
 class Database:
@@ -133,6 +165,7 @@ class Database:
                     id INTEGER PRIMARY KEY,
                     income_source_id INTEGER REFERENCES income_sources(id),
                     work_week_start TEXT,
+                    work_week_reference_date TEXT,
                     paid_on TEXT NOT NULL,
                     amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
                     notes TEXT NOT NULL DEFAULT '',
@@ -141,8 +174,12 @@ class Database:
 
                 CREATE INDEX IF NOT EXISTS idx_shifts_source_date
                     ON shifts(income_source_id, work_date);
+
+                CREATE INDEX IF NOT EXISTS idx_payments_source_week
+                    ON payments(income_source_id, work_week_start);
                 """
             )
+            self._ensure_payment_schema(connection)
             defaults = {
                 "work_week_start": "3",
                 "currency": "USD",
@@ -210,6 +247,7 @@ class Database:
             )
             if new_week_start != old_week_start:
                 self._recalculate_all_shifts(connection)
+                self._realign_payments(connection, new_week_start)
 
     def list_income_sources(
         self, *, include_inactive: bool = False
@@ -371,6 +409,206 @@ class Database:
         ).fetchone()
         if duplicate is not None:
             raise ValueError("An income source with that name already exists.")
+
+    def save_payment(self, payment: PaymentToSave) -> int:
+        with self.connect() as connection:
+            self._validate_payment(connection, payment)
+            week_start, _week_end = self._payment_week_bounds(
+                connection, payment.work_week_reference_date
+            )
+            cursor = connection.execute(
+                """
+                INSERT INTO payments(
+                    income_source_id, work_week_start, work_week_reference_date,
+                    paid_on, amount_cents, notes, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payment.income_source_id,
+                    week_start.isoformat(),
+                    payment.work_week_reference_date.isoformat(),
+                    payment.paid_on.isoformat(),
+                    payment.amount_cents,
+                    payment.notes.strip(),
+                    _now(),
+                ),
+            )
+        return int(cursor.lastrowid)
+
+    def get_payment(self, payment_id: int) -> PaymentRecord | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payments.id, payments.income_source_id,
+                       income_sources.name AS source_name, payments.paid_on,
+                       payments.work_week_start,
+                       COALESCE(payments.work_week_reference_date,
+                                payments.work_week_start) AS reference_date,
+                       payments.amount_cents, payments.notes
+                FROM payments
+                JOIN income_sources ON income_sources.id = payments.income_source_id
+                WHERE payments.id = ?
+                """,
+                (payment_id,),
+            ).fetchone()
+        return None if row is None else self._payment_record_from_row(row)
+
+    def update_payment(self, payment_id: int, payment: PaymentToSave) -> None:
+        with self.connect() as connection:
+            self._validate_payment(connection, payment)
+            week_start, _week_end = self._payment_week_bounds(
+                connection, payment.work_week_reference_date
+            )
+            cursor = connection.execute(
+                """
+                UPDATE payments
+                SET income_source_id = ?, work_week_start = ?,
+                    work_week_reference_date = ?, paid_on = ?, amount_cents = ?,
+                    notes = ?
+                WHERE id = ?
+                """,
+                (
+                    payment.income_source_id,
+                    week_start.isoformat(),
+                    payment.work_week_reference_date.isoformat(),
+                    payment.paid_on.isoformat(),
+                    payment.amount_cents,
+                    payment.notes.strip(),
+                    payment_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("The selected payment no longer exists.")
+
+    def delete_payment(self, payment_id: int) -> bool:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM payments WHERE id = ?", (payment_id,)
+            )
+        return cursor.rowcount > 0
+
+    def list_payments(self, limit: int = 30) -> list[PaymentRecord]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT payments.id, payments.income_source_id,
+                       income_sources.name AS source_name, payments.paid_on,
+                       payments.work_week_start,
+                       COALESCE(payments.work_week_reference_date,
+                                payments.work_week_start) AS reference_date,
+                       payments.amount_cents, payments.notes
+                FROM payments
+                JOIN income_sources ON income_sources.id = payments.income_source_id
+                ORDER BY payments.paid_on DESC, payments.id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [self._payment_record_from_row(row) for row in rows]
+
+    def payment_summary(
+        self, *, income_source_id: int, reference_date: date
+    ) -> PaymentSummary:
+        with self.connect() as connection:
+            week_start, week_end = self._payment_week_bounds(
+                connection, reference_date
+            )
+            earned = connection.execute(
+                """
+                SELECT COALESCE(SUM(gross_pay_cents), 0) AS total
+                FROM shifts
+                WHERE income_source_id = ?
+                  AND work_date BETWEEN ? AND ?
+                """,
+                (
+                    income_source_id,
+                    week_start.isoformat(),
+                    week_end.isoformat(),
+                ),
+            ).fetchone()["total"]
+            received = connection.execute(
+                """
+                SELECT COALESCE(SUM(amount_cents), 0) AS total
+                FROM payments
+                WHERE income_source_id = ? AND work_week_start = ?
+                """,
+                (income_source_id, week_start.isoformat()),
+            ).fetchone()["total"]
+        gross = int(earned)
+        payments = int(received)
+        return PaymentSummary(
+            income_source_id=income_source_id,
+            week_start=week_start,
+            week_end=week_end,
+            gross_earned_cents=gross,
+            payments_received_cents=payments,
+            amount_owed_cents=max(gross - payments, 0),
+            overpaid_cents=max(payments - gross, 0),
+        )
+
+    def has_duplicate_payment(
+        self,
+        payment: PaymentToSave,
+        *,
+        exclude_payment_id: int | None = None,
+    ) -> bool:
+        with self.connect() as connection:
+            week_start, _week_end = self._payment_week_bounds(
+                connection, payment.work_week_reference_date
+            )
+            row = connection.execute(
+                """
+                SELECT 1 FROM payments
+                WHERE income_source_id = ?
+                  AND work_week_start = ?
+                  AND paid_on = ?
+                  AND amount_cents = ?
+                  AND id != COALESCE(?, -1)
+                LIMIT 1
+                """,
+                (
+                    payment.income_source_id,
+                    week_start.isoformat(),
+                    payment.paid_on.isoformat(),
+                    payment.amount_cents,
+                    exclude_payment_id,
+                ),
+            ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def _validate_payment(
+        connection: sqlite3.Connection, payment: PaymentToSave
+    ) -> None:
+        if payment.amount_cents <= 0:
+            raise ValueError("Payment amount must be greater than $0.00.")
+        source = connection.execute(
+            "SELECT 1 FROM income_sources WHERE id = ?",
+            (payment.income_source_id,),
+        ).fetchone()
+        if source is None:
+            raise ValueError("The selected income source no longer exists.")
+        if len(payment.notes.strip()) > 500:
+            raise ValueError("Payment notes must be 500 characters or fewer.")
+
+    def _payment_week_bounds(
+        self, connection: sqlite3.Connection, reference_date: date
+    ) -> tuple[date, date]:
+        start_weekday = self._get_setting_int(connection, "work_week_start", 3)
+        return work_week_bounds(reference_date, start_weekday)
+
+    @staticmethod
+    def _payment_record_from_row(row: sqlite3.Row) -> PaymentRecord:
+        return PaymentRecord(
+            id=int(row["id"]),
+            income_source_id=int(row["income_source_id"]),
+            source_name=row["source_name"],
+            paid_on=date.fromisoformat(row["paid_on"]),
+            work_week_start=date.fromisoformat(row["work_week_start"]),
+            work_week_reference_date=date.fromisoformat(row["reference_date"]),
+            amount_cents=int(row["amount_cents"]),
+            notes=row["notes"],
+        )
 
     def prior_paid_minutes(
         self,
@@ -695,6 +933,45 @@ class Database:
         for income_source_id, week_start in affected_weeks:
             self._recalculate_affected_week(
                 connection, income_source_id, week_start
+            )
+
+    @staticmethod
+    def _ensure_payment_schema(connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(payments)")
+        }
+        if "work_week_reference_date" not in columns:
+            connection.execute(
+                "ALTER TABLE payments ADD COLUMN work_week_reference_date TEXT"
+            )
+        connection.execute(
+            """
+            UPDATE payments
+            SET work_week_reference_date = work_week_start
+            WHERE work_week_reference_date IS NULL
+              AND work_week_start IS NOT NULL
+            """
+        )
+
+    @staticmethod
+    def _realign_payments(
+        connection: sqlite3.Connection, start_weekday: int
+    ) -> None:
+        rows = connection.execute(
+            """
+            SELECT id, COALESCE(work_week_reference_date, work_week_start) AS reference_date
+            FROM payments
+            WHERE COALESCE(work_week_reference_date, work_week_start) IS NOT NULL
+            """
+        ).fetchall()
+        for row in rows:
+            reference_date = date.fromisoformat(row["reference_date"])
+            week_start, _week_end = work_week_bounds(
+                reference_date, start_weekday
+            )
+            connection.execute(
+                "UPDATE payments SET work_week_start = ? WHERE id = ?",
+                (week_start.isoformat(), row["id"]),
             )
 
     @staticmethod

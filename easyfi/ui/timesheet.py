@@ -17,6 +17,7 @@ from ..calculations import (
     work_week_bounds,
 )
 from ..database import Database, IncomeSource, ShiftToSave
+from .payments import PaymentsPage
 from .settings import SettingsPage
 
 
@@ -216,6 +217,8 @@ class TimesheetApp:
             self.page_host, self.database, self._settings_changed
         )
         self.settings_page.grid(row=0, column=0, sticky="nsew")
+        self.payments_page = PaymentsPage(self.page_host, self.database)
+        self.payments_page.grid(row=0, column=0, sticky="nsew")
         self._build_timesheet_page(self.timesheet_page)
         self.show_page("timesheet")
 
@@ -269,9 +272,13 @@ class TimesheetApp:
             command=lambda: self.show_page("timesheet"),
         )
         self.timesheet_nav_button.pack(fill="x", pady=2)
-        ttk.Button(
-            sidebar, text="Payments", style="Sidebar.TButton", state="disabled"
-        ).pack(fill="x", pady=2)
+        self.payments_nav_button = ttk.Button(
+            sidebar,
+            text="Payments",
+            style="Sidebar.TButton",
+            command=lambda: self.show_page("payments"),
+        )
+        self.payments_nav_button.pack(fill="x", pady=2)
         self.settings_nav_button = ttk.Button(
             sidebar,
             text="Settings",
@@ -281,15 +288,21 @@ class TimesheetApp:
         self.settings_nav_button.pack(fill="x", pady=2)
 
     def show_page(self, page: str) -> None:
+        self.timesheet_nav_button.configure(style="Sidebar.TButton")
+        self.payments_nav_button.configure(style="Sidebar.TButton")
+        self.settings_nav_button.configure(style="Sidebar.TButton")
         if page == "settings":
             self.settings_page.refresh()
             self.settings_page.tkraise()
-            self.timesheet_nav_button.configure(style="Sidebar.TButton")
             self.settings_nav_button.configure(style="SidebarActive.TButton")
+            return
+        if page == "payments":
+            self.payments_page.refresh()
+            self.payments_page.tkraise()
+            self.payments_nav_button.configure(style="SidebarActive.TButton")
             return
         self.timesheet_page.tkraise()
         self.timesheet_nav_button.configure(style="SidebarActive.TButton")
-        self.settings_nav_button.configure(style="Sidebar.TButton")
 
     def _settings_changed(self) -> None:
         editing_source_id = self.editing_source_id
@@ -307,6 +320,7 @@ class TimesheetApp:
         self._refresh_week_label()
         self.refresh_recent_shifts()
         self.refresh_calculation()
+        self.payments_page.refresh()
 
     def _build_shift_form(self, parent: ttk.Frame) -> None:
         panel = ttk.Frame(parent, style="Panel.TFrame", padding=20)

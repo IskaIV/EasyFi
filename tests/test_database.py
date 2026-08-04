@@ -8,7 +8,7 @@ from datetime import date
 from pathlib import Path
 
 from easyfi.calculations import calculate_shift
-from easyfi.database import Database, ShiftToSave
+from easyfi.database import Database, PaymentToSave, ShiftToSave
 
 
 class DatabaseTests(unittest.TestCase):
@@ -165,6 +165,120 @@ class DatabaseTests(unittest.TestCase):
                 (monday_id,),
             ).fetchone()
         self.assertEqual(after, (240, 0))
+
+    def test_payment_summary_uses_gross_wages_and_supports_partial_payments(self) -> None:
+        source = self.database.list_income_sources()[0]
+        self.database.save_shift(
+            self.make_shift(
+                work_date=date(2026, 8, 3),
+                clock_in="09:00",
+                clock_out="17:00",
+            )
+        )
+        first_payment = PaymentToSave(
+            income_source_id=source.id,
+            paid_on=date(2026, 8, 7),
+            work_week_reference_date=date(2026, 8, 3),
+            amount_cents=5_000,
+            notes="Partial deposit",
+        )
+        first_id = self.database.save_payment(first_payment)
+        self.assertTrue(self.database.has_duplicate_payment(first_payment))
+        self.assertFalse(
+            self.database.has_duplicate_payment(
+                first_payment, exclude_payment_id=first_id
+            )
+        )
+
+        summary = self.database.payment_summary(
+            income_source_id=source.id, reference_date=date(2026, 8, 3)
+        )
+        self.assertEqual(summary.gross_earned_cents, 19_200)
+        self.assertEqual(summary.payments_received_cents, 5_000)
+        self.assertEqual(summary.amount_owed_cents, 14_200)
+        self.assertEqual(summary.overpaid_cents, 0)
+
+        second_id = self.database.save_payment(
+            PaymentToSave(
+                income_source_id=source.id,
+                paid_on=date(2026, 8, 8),
+                work_week_reference_date=date(2026, 8, 3),
+                amount_cents=14_200,
+            )
+        )
+        paid = self.database.payment_summary(
+            income_source_id=source.id, reference_date=date(2026, 8, 3)
+        )
+        self.assertEqual(paid.amount_owed_cents, 0)
+        self.assertEqual(paid.overpaid_cents, 0)
+
+        self.database.update_payment(
+            second_id,
+            PaymentToSave(
+                income_source_id=source.id,
+                paid_on=date(2026, 8, 8),
+                work_week_reference_date=date(2026, 8, 3),
+                amount_cents=15_000,
+                notes="Corrected deposit",
+            ),
+        )
+        overpaid = self.database.payment_summary(
+            income_source_id=source.id, reference_date=date(2026, 8, 3)
+        )
+        self.assertEqual(overpaid.amount_owed_cents, 0)
+        self.assertEqual(overpaid.overpaid_cents, 800)
+        self.assertEqual(self.database.get_payment(second_id).notes, "Corrected deposit")
+
+        self.assertTrue(self.database.delete_payment(second_id))
+        self.assertFalse(self.database.delete_payment(second_id))
+        remaining = self.database.payment_summary(
+            income_source_id=source.id, reference_date=date(2026, 8, 3)
+        )
+        self.assertEqual(remaining.amount_owed_cents, 14_200)
+
+    def test_payment_week_is_realigned_when_work_week_start_changes(self) -> None:
+        source = self.database.list_income_sources()[0]
+        payment_id = self.database.save_payment(
+            PaymentToSave(
+                income_source_id=source.id,
+                paid_on=date(2026, 8, 7),
+                work_week_reference_date=date(2026, 8, 3),
+                amount_cents=10_000,
+            )
+        )
+        self.assertEqual(
+            self.database.get_payment(payment_id).work_week_start,
+            date(2026, 7, 30),
+        )
+        self.database.update_settings({"work_week_start": "0"})
+        self.assertEqual(
+            self.database.get_payment(payment_id).work_week_start,
+            date(2026, 8, 3),
+        )
+
+    def test_existing_payment_table_is_migrated(self) -> None:
+        migrated_path = Path(self.temp_directory.name) / "migration-test.db"
+        with closing(sqlite3.connect(migrated_path)) as connection:
+            connection.execute(
+                """
+                CREATE TABLE payments (
+                    id INTEGER PRIMARY KEY,
+                    income_source_id INTEGER,
+                    work_week_start TEXT,
+                    paid_on TEXT NOT NULL,
+                    amount_cents INTEGER NOT NULL,
+                    notes TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+        migrated_database = Database(migrated_path)
+        migrated_database.initialize()
+        with closing(sqlite3.connect(migrated_path)) as connection:
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(payments)")
+            }
+        self.assertIn("work_week_reference_date", columns)
 
     def test_saved_shift_and_breaks_persist(self) -> None:
         source = self.database.list_income_sources()[0]

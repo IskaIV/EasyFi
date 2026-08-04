@@ -19,11 +19,14 @@ calculate its pay, save it to SQLite, and view it after restarting the app.
 - Settings screen for work-week, clock-time, and default-break preferences
 - Add, edit, archive, and restore income sources
 - Per-source hourly rate, tax estimate, overtime threshold, and multiplier
+- Payment records assigned to an income source and work week
+- Live gross-earned, employer-paid, amount-owed, and overpaid balances
+- Partial and multiple payments with edit, delete, and duplicate protection
 - No network requests, accounts, or cloud services
 
 Tax values are user-configured estimates and are not tax-filing advice.
 
-For the planned Payments screen, EasyFi defines employer balance as:
+The Payments screen defines employer balance as:
 
 ```text
 amount owed = gross earned wages - employer payments received
@@ -62,7 +65,7 @@ python -m unittest discover -s tests -v
 - `income_sources`: active or archived default rates, tax estimates, and overtime rules
 - `shifts`: the original time entry plus immutable calculation snapshots
 - `shift_breaks`: each break associated with a shift
-- `payments`: reserved for the next amount-paid/amount-owed milestone
+- `payments`: employer deposits assigned to an income source and work week
 
 Money is stored as integer cents. Tax rates use basis points, and overtime
 multipliers use thousandths, avoiding binary floating-point errors.
