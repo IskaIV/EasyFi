@@ -109,7 +109,7 @@ class TimeInput(ttk.Frame):
         ).grid(row=0, column=1, sticky="ns")
 
     def open_picker(self) -> None:
-        TimePickerDialog(self.winfo_toplevel(), self.variable.get(), self._set_time)
+        TimePickerDialog(self, self.variable.get(), self._set_time)
 
     def _set_time(self, selected: str) -> None:
         self.variable.set(selected)
@@ -252,10 +252,17 @@ class CalendarDialog(tk.Toplevel):
 
 
 class TimePickerDialog(tk.Toplevel):
-    """Simple hour/minute/AM-PM picker."""
+    """Dropdown-style hour/minute/AM-PM list picker."""
 
-    def __init__(self, parent: tk.Misc, current: str, on_select) -> None:
-        super().__init__(parent)
+    PICKER_BACKGROUND = "#383838"
+    SELECTED_BACKGROUND = "#94C6FA"
+    SELECTED_FOREGROUND = "#1C2B35"
+
+    def __init__(self, anchor: tk.Misc, current: str, on_select) -> None:
+        owner = anchor.winfo_toplevel()
+        super().__init__(owner)
+        self.owner = owner
+        self._owner_click_binding: str | None = None
         try:
             normalized = normalize_clock_time(current)
         except ValueError:
@@ -268,59 +275,176 @@ class TimePickerDialog(tk.Toplevel):
         self.meridiem_var = tk.StringVar(value=meridiem)
         self.on_select = on_select
 
-        self.title("Choose a time")
+        self.overrideredirect(True)
         self.resizable(False, False)
-        self.configure(background=WINDOW_BACKGROUND)
-        self.transient(parent)
-        body = tk.Frame(self, background=PANEL_BACKGROUND, padx=20, pady=18)
+        self.configure(background=BORDER)
+        self.transient(owner)
+        body = tk.Frame(
+            self,
+            background=self.PICKER_BACKGROUND,
+            padx=6,
+            pady=6,
+        )
         body.pack(fill="both", expand=True, padx=1, pady=1)
-        tk.Label(
-            body,
-            text="Select a time",
-            background=PANEL_BACKGROUND,
-            foreground=TEXT,
-            font=("Segoe UI", 12, "bold"),
-        ).grid(row=0, column=0, columnspan=5, sticky="w", pady=(0, 12))
 
-        hour_box = ttk.Spinbox(
-            body, from_=1, to=12, textvariable=self.hour_var, width=4, wrap=True
-        )
-        hour_box.grid(row=1, column=0)
-        tk.Label(
-            body,
-            text=":",
-            background=PANEL_BACKGROUND,
-            foreground=TEXT,
-            font=("Segoe UI", 14, "bold"),
-        ).grid(row=1, column=1, padx=4)
-        minute_box = ttk.Spinbox(
-            body, from_=0, to=59, textvariable=self.minute_var, width=4, wrap=True
-        )
-        minute_box.grid(row=1, column=2)
-        ttk.Combobox(
-            body,
-            textvariable=self.meridiem_var,
-            values=("AM", "PM"),
-            state="readonly",
-            width=5,
-        ).grid(row=1, column=3, padx=(8, 0))
+        lists = tk.Frame(body, background=self.PICKER_BACKGROUND)
+        lists.pack(fill="both", expand=True)
+        for column in range(3):
+            lists.columnconfigure(column, weight=1)
 
-        buttons = tk.Frame(body, background=PANEL_BACKGROUND)
-        buttons.grid(row=2, column=0, columnspan=5, sticky="e", pady=(16, 0))
-        ttk.Button(
-            buttons, text="Cancel", style="Secondary.TButton", command=self.destroy
-        ).pack(side="left", padx=(0, 8))
-        ttk.Button(
-            buttons, text="Use time", style="Primary.TButton", command=self._apply
-        ).pack(side="left")
+        self.hour_list = self._listbox(lists)
+        self.minute_list = self._listbox(lists)
+        self.meridiem_list = self._listbox(lists)
+        self.hour_list.grid(row=0, column=0, sticky="nsew", padx=(0, 3))
+        self.minute_list.grid(row=0, column=1, sticky="nsew", padx=3)
+        self.meridiem_list.grid(row=0, column=2, sticky="nsew", padx=(3, 0))
+
+        hours = tuple(f"{value:02d}" for value in range(1, 13))
+        minutes = tuple(f"{value:02d}" for value in range(60))
+        meridiems = ("AM", "PM")
+        self._fill_list(
+            self.hour_list, self._rotate_values(hours, f"{int(hour):02d}")
+        )
+        self._fill_list(
+            self.minute_list, self._rotate_values(minutes, minute)
+        )
+        self._fill_list(
+            self.meridiem_list, self._rotate_values(meridiems, meridiem)
+        )
+        self.hour_list.bind(
+            "<<ListboxSelect>>",
+            lambda _event: self._update_variable(self.hour_list, self.hour_var),
+        )
+        self.minute_list.bind(
+            "<<ListboxSelect>>",
+            lambda _event: self._update_variable(self.minute_list, self.minute_var),
+        )
+        self.meridiem_list.bind(
+            "<<ListboxSelect>>",
+            lambda _event: self._update_variable(
+                self.meridiem_list, self.meridiem_var
+            ),
+        )
+        for listbox in (self.hour_list, self.minute_list, self.meridiem_list):
+            listbox.bind("<Double-1>", lambda _event: self.after_idle(self._apply))
+            listbox.bind(
+                "<MouseWheel>",
+                lambda event, target=listbox: self._scroll_list(target, event),
+            )
+
+        buttons = tk.Frame(body, background=self.PICKER_BACKGROUND)
+        buttons.pack(fill="x", pady=(7, 0))
+        tk.Button(
+            buttons,
+            text="Cancel",
+            command=self.destroy,
+            background=self.PICKER_BACKGROUND,
+            foreground=TEXT,
+            activebackground="#474747",
+            activeforeground=TEXT,
+            relief="solid",
+            borderwidth=1,
+            highlightthickness=0,
+            font=("Segoe UI", 10),
+            padx=15,
+            pady=7,
+            cursor="hand2",
+        ).pack(side="left", fill="x", expand=True, padx=(0, 4))
+        tk.Button(
+            buttons,
+            text="Use time",
+            command=self._apply,
+            background=PRIMARY,
+            foreground=PRIMARY_TEXT,
+            activebackground=PRIMARY,
+            activeforeground=PRIMARY_TEXT,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            font=("Segoe UI", 10, "bold"),
+            padx=15,
+            pady=8,
+            cursor="hand2",
+        ).pack(side="left", fill="x", expand=True, padx=(4, 0))
+
         self.bind("<Return>", lambda _event: self._apply())
         self.bind("<Escape>", lambda _event: self.destroy())
+        self.bind("<FocusOut>", lambda _event: self.after(20, self._close_if_unfocused))
         self.update_idletasks()
-        x = parent.winfo_rootx() + max(0, (parent.winfo_width() - self.winfo_width()) // 2)
-        y = parent.winfo_rooty() + max(0, (parent.winfo_height() - self.winfo_height()) // 2)
-        self.geometry(f"+{x}+{y}")
-        self.grab_set()
-        hour_box.focus_set()
+        self._position_below(anchor)
+        self._owner_click_binding = owner.bind(
+            "<Button-1>", lambda _event: self.destroy(), add="+"
+        )
+        self.lift()
+        self.hour_list.focus_set()
+
+    def _listbox(self, parent: tk.Misc) -> tk.Listbox:
+        return tk.Listbox(
+            parent,
+            width=6,
+            height=7,
+            background=self.PICKER_BACKGROUND,
+            foreground=TEXT,
+            selectbackground=self.SELECTED_BACKGROUND,
+            selectforeground=self.SELECTED_FOREGROUND,
+            activestyle="none",
+            exportselection=False,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            font=("Segoe UI", 12),
+            justify="center",
+            cursor="hand2",
+        )
+
+    @staticmethod
+    def _rotate_values(values: tuple[str, ...], selected: str) -> tuple[str, ...]:
+        selected_index = values.index(selected)
+        return values[selected_index:] + values[:selected_index]
+
+    @staticmethod
+    def _fill_list(listbox: tk.Listbox, values: tuple[str, ...]) -> None:
+        for value in values:
+            listbox.insert("end", value)
+        listbox.selection_set(0)
+        listbox.activate(0)
+        listbox.yview(0)
+
+    @staticmethod
+    def _update_variable(listbox: tk.Listbox, variable: tk.StringVar) -> None:
+        selection = listbox.curselection()
+        if selection:
+            variable.set(listbox.get(selection[0]))
+
+    @staticmethod
+    def _scroll_list(listbox: tk.Listbox, event: tk.Event) -> str:
+        listbox.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        return "break"
+
+    def _position_below(self, anchor: tk.Misc) -> None:
+        x = anchor.winfo_rootx()
+        y = anchor.winfo_rooty() + anchor.winfo_height() + 3
+        width = self.winfo_reqwidth()
+        height = self.winfo_reqheight()
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        x = min(x, screen_width - width - 8)
+        if y + height > screen_height - 8:
+            y = anchor.winfo_rooty() - height - 3
+        self.geometry(f"+{max(8, x)}+{max(8, y)}")
+
+    def _close_if_unfocused(self) -> None:
+        if not self.winfo_exists():
+            return
+        focused = self.focus_get()
+        if focused is None or focused.winfo_toplevel() is not self:
+            self.destroy()
+
+    def destroy(self) -> None:
+        if self._owner_click_binding is not None and self.owner.winfo_exists():
+            self.owner.unbind("<Button-1>", self._owner_click_binding)
+            self._owner_click_binding = None
+        super().destroy()
 
     def _apply(self) -> None:
         try:
@@ -335,4 +459,3 @@ class TimePickerDialog(tk.Toplevel):
             return
         self.on_select(format_clock_time_12h(normalized))
         self.destroy()
-
