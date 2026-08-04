@@ -55,10 +55,116 @@ class DatabaseTests(unittest.TestCase):
 
     def test_initialize_creates_defaults_and_income_source(self) -> None:
         self.assertEqual(self.database.get_setting_int("work_week_start", -1), 3)
+        self.assertEqual(
+            self.database.get_setting("default_clock_in", "missing"), "08:30"
+        )
+        self.assertEqual(
+            self.database.get_setting("default_clock_out", "missing"), "17:00"
+        )
+        self.assertEqual(
+            self.database.get_setting("default_break_minutes", "missing"), "30"
+        )
         sources = self.database.list_income_sources()
         self.assertEqual(len(sources), 1)
         self.assertEqual(sources[0].name, "Main job")
         self.assertEqual(sources[0].hourly_rate_cents, 2400)
+        self.assertTrue(sources[0].active)
+
+    def test_settings_and_income_source_lifecycle(self) -> None:
+        self.database.update_settings(
+            {
+                "work_week_start": "6",
+                "default_clock_in": "07:15",
+                "default_clock_out": "15:45",
+                "default_break_minutes": "45",
+            }
+        )
+        self.assertEqual(self.database.get_setting_int("work_week_start", -1), 6)
+        self.assertEqual(
+            self.database.get_setting("default_clock_in", "missing"), "07:15"
+        )
+
+        source_id = self.database.add_income_source(
+            name="Weekend job",
+            hourly_rate_cents=1850,
+            tax_rate_bps=1500,
+            overtime_after_minutes=1800,
+            overtime_multiplier_milli=2000,
+        )
+        self.database.update_income_source(
+            source_id,
+            name="Weekend work",
+            hourly_rate_cents=2000,
+            tax_rate_bps=1600,
+            overtime_after_minutes=1920,
+            overtime_multiplier_milli=1750,
+        )
+        source = next(
+            item
+            for item in self.database.list_income_sources(include_inactive=True)
+            if item.id == source_id
+        )
+        self.assertEqual(source.name, "Weekend work")
+        self.assertEqual(source.hourly_rate_cents, 2000)
+        self.assertEqual(source.overtime_multiplier_milli, 1750)
+
+        self.database.set_income_source_active(source_id, False)
+        self.assertNotIn(source_id, [item.id for item in self.database.list_income_sources()])
+        archived = next(
+            item
+            for item in self.database.list_income_sources(include_inactive=True)
+            if item.id == source_id
+        )
+        self.assertFalse(archived.active)
+        self.database.set_income_source_active(source_id, True)
+        self.assertIn(source_id, [item.id for item in self.database.list_income_sources()])
+
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            self.database.add_income_source(
+                name="weekend WORK",
+                hourly_rate_cents=2000,
+                tax_rate_bps=0,
+                overtime_after_minutes=2400,
+                overtime_multiplier_milli=1500,
+            )
+
+    def test_last_active_income_source_cannot_be_archived(self) -> None:
+        source = self.database.list_income_sources()[0]
+        with self.assertRaisesRegex(ValueError, "At least one"):
+            self.database.set_income_source_active(source.id, False)
+
+    def test_changing_week_start_regroups_overtime(self) -> None:
+        sunday_id = self.database.save_shift(
+            self.make_shift(
+                work_date=date(2026, 8, 2),
+                clock_in="08:00",
+                clock_out="16:00",
+                overtime_after_minutes=480,
+            )
+        )
+        monday_id = self.database.save_shift(
+            self.make_shift(
+                work_date=date(2026, 8, 3),
+                clock_in="08:00",
+                clock_out="12:00",
+                overtime_after_minutes=480,
+            )
+        )
+        self.assertGreater(sunday_id, 0)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            before = connection.execute(
+                "SELECT regular_minutes, overtime_minutes FROM shifts WHERE id = ?",
+                (monday_id,),
+            ).fetchone()
+        self.assertEqual(before, (0, 240))
+
+        self.database.update_settings({"work_week_start": "0"})
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            after = connection.execute(
+                "SELECT regular_minutes, overtime_minutes FROM shifts WHERE id = ?",
+                (monday_id,),
+            ).fetchone()
+        self.assertEqual(after, (240, 0))
 
     def test_saved_shift_and_breaks_persist(self) -> None:
         source = self.database.list_income_sources()[0]

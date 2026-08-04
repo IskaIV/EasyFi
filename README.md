@@ -16,6 +16,9 @@ calculate its pay, save it to SQLite, and view it after restarting the app.
 - Edit or delete saved shifts with automatic weekly overtime recalculation
 - Duplicate-shift warning before saving matching entries
 - Normalized clock times and guarded date, rate, tax, and break inputs
+- Settings screen for work-week, clock-time, and default-break preferences
+- Add, edit, archive, and restore income sources
+- Per-source hourly rate, tax estimate, overtime threshold, and multiplier
 - No network requests, accounts, or cloud services
 
 Tax values are user-configured estimates and are not tax-filing advice.
@@ -55,8 +58,8 @@ python -m unittest discover -s tests -v
 
 ## Data model
 
-- `settings`: work-week and currency preferences
-- `income_sources`: default rates, tax estimates, and overtime rules
+- `settings`: work-week, clock-time, break, and currency preferences
+- `income_sources`: active or archived default rates, tax estimates, and overtime rules
 - `shifts`: the original time entry plus immutable calculation snapshots
 - `shift_breaks`: each break associated with a shift
 - `payments`: reserved for the next amount-paid/amount-owed milestone

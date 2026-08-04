@@ -17,6 +17,7 @@ from ..calculations import (
     work_week_bounds,
 )
 from ..database import Database, IncomeSource, ShiftToSave
+from .settings import SettingsPage
 
 
 WINDOW_BACKGROUND = "#F4F7F5"
@@ -51,8 +52,12 @@ class TimesheetApp:
         self.save_button_var = tk.StringVar(value="Add shift")
         self.date_var = tk.StringVar(value=date.today().isoformat())
         self.source_var = tk.StringVar()
-        self.clock_in_var = tk.StringVar(value="08:30")
-        self.clock_out_var = tk.StringVar(value="17:00")
+        self.clock_in_var = tk.StringVar(
+            value=self.database.get_setting("default_clock_in", "08:30")
+        )
+        self.clock_out_var = tk.StringVar(
+            value=self.database.get_setting("default_clock_out", "17:00")
+        )
         self.rate_var = tk.StringVar(value="24.00")
         self.tax_var = tk.StringVar(value="18.00")
         self.week_var = tk.StringVar()
@@ -71,7 +76,9 @@ class TimesheetApp:
         self._configure_styles()
         self._build_ui()
         self._load_sources()
-        self.add_break("30")
+        initial_break = self.database.get_setting("default_break_minutes", "30")
+        if initial_break != "0":
+            self.add_break(initial_break)
         self._wire_live_updates()
         self.refresh_calculation()
         self.refresh_recent_shifts()
@@ -196,8 +203,23 @@ class TimesheetApp:
         shell.rowconfigure(0, weight=1)
 
         self._build_sidebar(shell)
-        content = ttk.Frame(shell, style="App.TFrame", padding=(26, 22))
-        content.grid(row=0, column=1, sticky="nsew")
+        self.page_host = ttk.Frame(shell, style="App.TFrame")
+        self.page_host.grid(row=0, column=1, sticky="nsew")
+        self.page_host.columnconfigure(0, weight=1)
+        self.page_host.rowconfigure(0, weight=1)
+
+        self.timesheet_page = ttk.Frame(
+            self.page_host, style="App.TFrame", padding=(26, 22)
+        )
+        self.timesheet_page.grid(row=0, column=0, sticky="nsew")
+        self.settings_page = SettingsPage(
+            self.page_host, self.database, self._settings_changed
+        )
+        self.settings_page.grid(row=0, column=0, sticky="nsew")
+        self._build_timesheet_page(self.timesheet_page)
+        self.show_page("timesheet")
+
+    def _build_timesheet_page(self, content: ttk.Frame) -> None:
         content.columnconfigure(0, weight=1)
         content.rowconfigure(2, weight=1)
 
@@ -240,15 +262,51 @@ class TimesheetApp:
         ttk.Button(
             sidebar, text="Overview", style="Sidebar.TButton", state="disabled"
         ).pack(fill="x", pady=2)
-        ttk.Button(
-            sidebar, text="Timesheet", style="SidebarActive.TButton"
-        ).pack(fill="x", pady=2)
+        self.timesheet_nav_button = ttk.Button(
+            sidebar,
+            text="Timesheet",
+            style="SidebarActive.TButton",
+            command=lambda: self.show_page("timesheet"),
+        )
+        self.timesheet_nav_button.pack(fill="x", pady=2)
         ttk.Button(
             sidebar, text="Payments", style="Sidebar.TButton", state="disabled"
         ).pack(fill="x", pady=2)
-        ttk.Button(
-            sidebar, text="Settings", style="Sidebar.TButton", state="disabled"
-        ).pack(fill="x", pady=2)
+        self.settings_nav_button = ttk.Button(
+            sidebar,
+            text="Settings",
+            style="Sidebar.TButton",
+            command=lambda: self.show_page("settings"),
+        )
+        self.settings_nav_button.pack(fill="x", pady=2)
+
+    def show_page(self, page: str) -> None:
+        if page == "settings":
+            self.settings_page.refresh()
+            self.settings_page.tkraise()
+            self.timesheet_nav_button.configure(style="Sidebar.TButton")
+            self.settings_nav_button.configure(style="SidebarActive.TButton")
+            return
+        self.timesheet_page.tkraise()
+        self.timesheet_nav_button.configure(style="SidebarActive.TButton")
+        self.settings_nav_button.configure(style="Sidebar.TButton")
+
+    def _settings_changed(self) -> None:
+        editing_source_id = self.editing_source_id
+        self._load_sources()
+        if (
+            self.editing_shift_id is not None
+            and editing_source_id is not None
+            and all(source.id != editing_source_id for source in self.sources)
+        ):
+            self._reset_form(clear_status=False)
+            self._set_status(
+                "Shift editing was closed because its income source was archived.",
+                error=True,
+            )
+        self._refresh_week_label()
+        self.refresh_recent_shifts()
+        self.refresh_calculation()
 
     def _build_shift_form(self, parent: ttk.Frame) -> None:
         panel = ttk.Frame(parent, style="Panel.TFrame", padding=20)
@@ -449,6 +507,14 @@ class TimesheetApp:
         return entry
 
     def _load_sources(self) -> None:
+        selected_source = self.source_by_label.get(self.source_var.get())
+        selected_source_id = selected_source.id if selected_source is not None else None
+        preserve_shift_values = (
+            self.editing_shift_id is not None
+            and self.editing_source_id == selected_source_id
+        )
+        preserved_rate = self.rate_var.get()
+        preserved_tax = self.tax_var.get()
         self.sources = self.database.list_income_sources()
         self.source_by_label = {
             f"{source.name} · {format_money(source.hourly_rate_cents)}/hr": source
@@ -457,8 +523,21 @@ class TimesheetApp:
         labels = list(self.source_by_label)
         self.source_combo.configure(values=labels)
         if labels:
-            self.source_var.set(labels[0])
+            selected_label = next(
+                (
+                    label
+                    for label, source in self.source_by_label.items()
+                    if source.id == selected_source_id
+                ),
+                labels[0],
+            )
+            self.source_var.set(selected_label)
             self._apply_selected_source()
+            if preserve_shift_values and any(
+                source.id == selected_source_id for source in self.sources
+            ):
+                self.rate_var.set(preserved_rate)
+                self.tax_var.set(preserved_tax)
 
     def _wire_live_updates(self) -> None:
         for variable in (
@@ -736,12 +815,18 @@ class TimesheetApp:
         self.save_button_var.set("Add shift")
         self.delete_form_button.configure(state="disabled")
         self.date_var.set(date.today().isoformat())
-        self.clock_in_var.set("08:30")
-        self.clock_out_var.set("17:00")
+        self.clock_in_var.set(
+            self.database.get_setting("default_clock_in", "08:30")
+        )
+        self.clock_out_var.set(
+            self.database.get_setting("default_clock_out", "17:00")
+        )
         for child in self.breaks_frame.winfo_children():
             child.destroy()
         self.break_variables.clear()
-        self.add_break("30")
+        default_break = self.database.get_setting("default_break_minutes", "30")
+        if default_break != "0":
+            self.add_break(default_break)
         labels = list(self.source_by_label)
         if labels:
             self.source_var.set(labels[0])

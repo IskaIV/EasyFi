@@ -24,6 +24,7 @@ class IncomeSource:
     tax_rate_bps: int
     overtime_after_minutes: int
     overtime_multiplier_milli: int
+    active: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +146,9 @@ class Database:
             defaults = {
                 "work_week_start": "3",
                 "currency": "USD",
+                "default_clock_in": "08:30",
+                "default_clock_out": "17:00",
+                "default_break_minutes": "30",
             }
             connection.executemany(
                 "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)",
@@ -166,29 +170,207 @@ class Database:
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def get_setting_int(self, key: str, default: int) -> int:
+        value = self.get_setting(key, str(default))
+        try:
+            return int(value)
+        except ValueError:
+            return default
+
+    def get_setting(self, key: str, default: str) -> str:
         with self.connect() as connection:
             row = connection.execute(
                 "SELECT value FROM settings WHERE key = ?", (key,)
             ).fetchone()
-        if row is None:
-            return default
-        try:
-            return int(row["value"])
-        except ValueError:
-            return default
+        return default if row is None else str(row["value"])
 
-    def list_income_sources(self) -> list[IncomeSource]:
+    def update_settings(self, values: dict[str, str]) -> None:
+        allowed = {
+            "work_week_start",
+            "currency",
+            "default_clock_in",
+            "default_clock_out",
+            "default_break_minutes",
+        }
+        unknown = set(values) - allowed
+        if unknown:
+            raise ValueError(f"Unsupported setting: {sorted(unknown)[0]}")
         with self.connect() as connection:
-            rows = connection.execute(
+            old_week_start = self._get_setting_int(
+                connection, "work_week_start", 3
+            )
+            connection.executemany(
                 """
+                INSERT INTO settings(key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                [(key, str(value)) for key, value in values.items()],
+            )
+            new_week_start = self._get_setting_int(
+                connection, "work_week_start", 3
+            )
+            if new_week_start != old_week_start:
+                self._recalculate_all_shifts(connection)
+
+    def list_income_sources(
+        self, *, include_inactive: bool = False
+    ) -> list[IncomeSource]:
+        with self.connect() as connection:
+            active_filter = "" if include_inactive else "WHERE active = 1"
+            rows = connection.execute(
+                f"""
                 SELECT id, name, hourly_rate_cents, tax_rate_bps,
-                       overtime_after_minutes, overtime_multiplier_milli
+                       overtime_after_minutes, overtime_multiplier_milli, active
                 FROM income_sources
-                WHERE active = 1
+                {active_filter}
                 ORDER BY name COLLATE NOCASE
                 """
             ).fetchall()
-        return [IncomeSource(**dict(row)) for row in rows]
+        return [
+            IncomeSource(
+                id=int(row["id"]),
+                name=row["name"],
+                hourly_rate_cents=int(row["hourly_rate_cents"]),
+                tax_rate_bps=int(row["tax_rate_bps"]),
+                overtime_after_minutes=int(row["overtime_after_minutes"]),
+                overtime_multiplier_milli=int(row["overtime_multiplier_milli"]),
+                active=bool(row["active"]),
+            )
+            for row in rows
+        ]
+
+    def add_income_source(
+        self,
+        *,
+        name: str,
+        hourly_rate_cents: int,
+        tax_rate_bps: int,
+        overtime_after_minutes: int,
+        overtime_multiplier_milli: int,
+    ) -> int:
+        clean_name = self._validate_income_source_values(
+            name,
+            hourly_rate_cents,
+            tax_rate_bps,
+            overtime_after_minutes,
+            overtime_multiplier_milli,
+        )
+        with self.connect() as connection:
+            self._ensure_unique_source_name(connection, clean_name)
+            cursor = connection.execute(
+                """
+                INSERT INTO income_sources(
+                    name, hourly_rate_cents, tax_rate_bps,
+                    overtime_after_minutes, overtime_multiplier_milli,
+                    active, created_at
+                ) VALUES (?, ?, ?, ?, ?, 1, ?)
+                """,
+                (
+                    clean_name,
+                    hourly_rate_cents,
+                    tax_rate_bps,
+                    overtime_after_minutes,
+                    overtime_multiplier_milli,
+                    _now(),
+                ),
+            )
+        return int(cursor.lastrowid)
+
+    def update_income_source(
+        self,
+        source_id: int,
+        *,
+        name: str,
+        hourly_rate_cents: int,
+        tax_rate_bps: int,
+        overtime_after_minutes: int,
+        overtime_multiplier_milli: int,
+    ) -> None:
+        clean_name = self._validate_income_source_values(
+            name,
+            hourly_rate_cents,
+            tax_rate_bps,
+            overtime_after_minutes,
+            overtime_multiplier_milli,
+        )
+        with self.connect() as connection:
+            self._ensure_unique_source_name(connection, clean_name, source_id)
+            cursor = connection.execute(
+                """
+                UPDATE income_sources
+                SET name = ?, hourly_rate_cents = ?, tax_rate_bps = ?,
+                    overtime_after_minutes = ?, overtime_multiplier_milli = ?
+                WHERE id = ?
+                """,
+                (
+                    clean_name,
+                    hourly_rate_cents,
+                    tax_rate_bps,
+                    overtime_after_minutes,
+                    overtime_multiplier_milli,
+                    source_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("The selected income source no longer exists.")
+
+    def set_income_source_active(self, source_id: int, active: bool) -> None:
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT active FROM income_sources WHERE id = ?", (source_id,)
+            ).fetchone()
+            if existing is None:
+                raise ValueError("The selected income source no longer exists.")
+            if not active and bool(existing["active"]):
+                active_count = connection.execute(
+                    "SELECT COUNT(*) AS total FROM income_sources WHERE active = 1"
+                ).fetchone()["total"]
+                if int(active_count) <= 1:
+                    raise ValueError("At least one income source must remain active.")
+            connection.execute(
+                "UPDATE income_sources SET active = ? WHERE id = ?",
+                (1 if active else 0, source_id),
+            )
+
+    @staticmethod
+    def _validate_income_source_values(
+        name: str,
+        hourly_rate_cents: int,
+        tax_rate_bps: int,
+        overtime_after_minutes: int,
+        overtime_multiplier_milli: int,
+    ) -> str:
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("Income source name is required.")
+        if len(clean_name) > 100:
+            raise ValueError("Income source name must be 100 characters or fewer.")
+        if hourly_rate_cents <= 0:
+            raise ValueError("Hourly rate must be greater than $0.00.")
+        if not 0 <= tax_rate_bps <= 10_000:
+            raise ValueError("Estimated tax must be between 0% and 100%.")
+        if not 0 <= overtime_after_minutes <= 7 * 24 * 60:
+            raise ValueError("Overtime threshold must be between 0 and 168 hours.")
+        if not 1000 <= overtime_multiplier_milli <= 5000:
+            raise ValueError("Overtime multiplier must be between 1.0x and 5.0x.")
+        return clean_name
+
+    @staticmethod
+    def _ensure_unique_source_name(
+        connection: sqlite3.Connection,
+        name: str,
+        exclude_source_id: int | None = None,
+    ) -> None:
+        duplicate = connection.execute(
+            """
+            SELECT 1 FROM income_sources
+            WHERE name = ? COLLATE NOCASE
+              AND id != COALESCE(?, -1)
+            LIMIT 1
+            """,
+            (name, exclude_source_id),
+        ).fetchone()
+        if duplicate is not None:
+            raise ValueError("An income source with that name already exists.")
 
     def prior_paid_minutes(
         self,
@@ -497,6 +679,23 @@ class Database:
                 ),
             )
             prior_minutes += calculation.paid_minutes
+
+    def _recalculate_all_shifts(self, connection: sqlite3.Connection) -> None:
+        start_weekday = self._get_setting_int(connection, "work_week_start", 3)
+        rows = connection.execute(
+            "SELECT DISTINCT income_source_id, work_date FROM shifts"
+        ).fetchall()
+        affected_weeks: set[tuple[int, date]] = set()
+        for row in rows:
+            work_date_value = date.fromisoformat(row["work_date"])
+            week_start, _week_end = work_week_bounds(
+                work_date_value, start_weekday
+            )
+            affected_weeks.add((int(row["income_source_id"]), week_start))
+        for income_source_id, week_start in affected_weeks:
+            self._recalculate_affected_week(
+                connection, income_source_id, week_start
+            )
 
     @staticmethod
     def _get_setting_int(
