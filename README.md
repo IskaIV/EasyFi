@@ -74,6 +74,10 @@ python -m easyfi
 The interface enables Windows Per-Monitor V2 DPI awareness before creating its
 first window, keeping text and controls crisp at common display scaling levels.
 
+## Releases
+
+- [v1.0.0-alpha](docs/releases/v1.0.0-alpha.md) — first complete alpha preview
+
 ## Where your data lives
 
 EasyFi stores personal data outside the source tree and outside the packaged
