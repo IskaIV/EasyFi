@@ -117,14 +117,14 @@ class OverviewPage(ttk.Frame):
         self._metric_card(
             metrics,
             2,
-            "Employer payments",
+            "Payments this week",
             self.payments_var,
             self.payments_context_var,
         )
         self._metric_card(
             metrics,
             3,
-            "Amount owed",
+            "Total amount owed",
             self.owed_var,
             self.owed_context_var,
         )
@@ -167,7 +167,7 @@ class OverviewPage(ttk.Frame):
             panel.columnconfigure(column, weight=1)
         self._detail_value(panel, 0, "Estimated tax", self.tax_var)
         self._detail_value(panel, 1, "Estimated take-home", self.take_home_var)
-        self._detail_value(panel, 2, "Overpaid", self.overpaid_var)
+        self._detail_value(panel, 2, "Total overpaid", self.overpaid_var)
 
     @staticmethod
     def _detail_value(
@@ -206,9 +206,9 @@ class OverviewPage(ttk.Frame):
             "hours": "Paid time",
             "regular": "Regular",
             "overtime": "Overtime",
-            "gross": "Gross",
-            "payments": "Payments",
-            "owed": "Owed",
+            "gross": "Gross (week)",
+            "payments": "Paid (week)",
+            "owed": "Total owed",
             "status": "Status",
         }
         widths = {
@@ -300,13 +300,17 @@ class OverviewPage(ttk.Frame):
             owed_status = "Still unpaid"
         elif summary.overpaid_cents > 0:
             owed_status = f"Overpaid by {format_money(summary.overpaid_cents)}"
-        elif summary.gross_earned_cents > 0:
+        elif (
+            summary.gross_earned_cents > 0
+            or summary.payments_received_cents > 0
+            or summary.previous_amount_owed_cents > 0
+        ):
             owed_status = "Paid in full"
         else:
-            owed_status = "No wages recorded"
+            owed_status = "No outstanding balance"
         self.owed_context_var.set(
-            f"{owed_status}\n"
-            f"Previous week: {format_money(summary.previous_amount_owed_cents)} owed"
+            f"{owed_status} through this week\n"
+            f"Previous total: {format_money(summary.previous_amount_owed_cents)}"
         )
         self.tax_var.set(format_money(summary.estimated_tax_cents))
         self.take_home_var.set(format_money(summary.estimated_take_home_cents))
@@ -321,10 +325,10 @@ class OverviewPage(ttk.Frame):
                 status = "Owed"
             elif row.overpaid_cents > 0:
                 status = "Overpaid"
-            elif row.gross_earned_cents > 0:
+            elif row.gross_earned_cents > 0 or row.payments_received_cents > 0:
                 status = "Paid"
             else:
-                status = "No wages"
+                status = "Settled"
             self.breakdown_table.insert(
                 "",
                 "end",

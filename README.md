@@ -44,6 +44,10 @@ For example, if you earned `$1,000` and received `$500`, EasyFi reports `$500`
 still owed. Estimated taxes and take-home pay are displayed separately and do
 not reduce the employer's gross obligation.
 
+Outstanding balances carry forward across work weeks. Payments recorded in the
+selected week reduce the full running balance for that income source, not only
+the wages earned during that week.
+
 > **Tax notice:** Tax percentages in EasyFi are user-configured estimates for
 > planning purposes. They are not tax-filing or financial advice.
 

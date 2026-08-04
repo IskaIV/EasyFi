@@ -896,15 +896,19 @@ class Database:
         income_source_id: int | None,
     ) -> tuple[OverviewSourceSummary, ...]:
         source_filter = ""
-        shift_parameters: list[object] = [
+        weekly_shift_parameters: list[object] = [
             week_start.isoformat(),
             week_end.isoformat(),
         ]
-        payment_parameters: list[object] = [week_start.isoformat()]
+        weekly_payment_parameters: list[object] = [week_start.isoformat()]
+        cumulative_shift_parameters: list[object] = [week_end.isoformat()]
+        cumulative_payment_parameters: list[object] = [week_start.isoformat()]
         if income_source_id is not None:
             source_filter = " AND income_source_id = ?"
-            shift_parameters.append(income_source_id)
-            payment_parameters.append(income_source_id)
+            weekly_shift_parameters.append(income_source_id)
+            weekly_payment_parameters.append(income_source_id)
+            cumulative_shift_parameters.append(income_source_id)
+            cumulative_payment_parameters.append(income_source_id)
 
         shift_rows = connection.execute(
             f"""
@@ -919,7 +923,7 @@ class Database:
             WHERE work_date BETWEEN ? AND ?{source_filter}
             GROUP BY income_source_id
             """,
-            shift_parameters,
+            weekly_shift_parameters,
         ).fetchall()
         payment_rows = connection.execute(
             f"""
@@ -929,12 +933,44 @@ class Database:
             WHERE work_week_start = ?{source_filter}
             GROUP BY income_source_id
             """,
-            payment_parameters,
+            weekly_payment_parameters,
+        ).fetchall()
+
+        cumulative_shift_rows = connection.execute(
+            f"""
+            SELECT income_source_id,
+                   COALESCE(SUM(gross_pay_cents), 0) AS gross_earned_cents
+            FROM shifts
+            WHERE work_date <= ?{source_filter}
+            GROUP BY income_source_id
+            """,
+            cumulative_shift_parameters,
+        ).fetchall()
+        cumulative_payment_rows = connection.execute(
+            f"""
+            SELECT income_source_id,
+                   COALESCE(SUM(amount_cents), 0) AS payments_received_cents
+            FROM payments
+            WHERE work_week_start <= ?{source_filter}
+            GROUP BY income_source_id
+            """,
+            cumulative_payment_parameters,
         ).fetchall()
 
         shifts = {int(row["income_source_id"]): row for row in shift_rows}
         payments = {int(row["income_source_id"]): row for row in payment_rows}
-        source_ids = set(shifts) | set(payments)
+        cumulative_shifts = {
+            int(row["income_source_id"]): row for row in cumulative_shift_rows
+        }
+        cumulative_payments = {
+            int(row["income_source_id"]): row for row in cumulative_payment_rows
+        }
+        source_ids = (
+            set(shifts)
+            | set(payments)
+            | set(cumulative_shifts)
+            | set(cumulative_payments)
+        )
         if income_source_id is not None:
             exists = connection.execute(
                 "SELECT 1 FROM income_sources WHERE id = ?",
@@ -958,10 +994,22 @@ class Database:
         for source_id in sorted(source_ids, key=lambda item: names.get(item, "").casefold()):
             shift = shifts.get(source_id)
             payment = payments.get(source_id)
+            cumulative_shift = cumulative_shifts.get(source_id)
+            cumulative_payment = cumulative_payments.get(source_id)
             gross = int(shift["gross_earned_cents"]) if shift is not None else 0
             received = (
                 int(payment["payments_received_cents"])
                 if payment is not None
+                else 0
+            )
+            cumulative_gross = (
+                int(cumulative_shift["gross_earned_cents"])
+                if cumulative_shift is not None
+                else 0
+            )
+            cumulative_received = (
+                int(cumulative_payment["payments_received_cents"])
+                if cumulative_payment is not None
                 else 0
             )
             result.append(
@@ -985,8 +1033,12 @@ class Database:
                     if shift is not None
                     else 0,
                     payments_received_cents=received,
-                    amount_owed_cents=max(gross - received, 0),
-                    overpaid_cents=max(received - gross, 0),
+                    amount_owed_cents=max(
+                        cumulative_gross - cumulative_received, 0
+                    ),
+                    overpaid_cents=max(
+                        cumulative_received - cumulative_gross, 0
+                    ),
                 )
             )
         return tuple(result)

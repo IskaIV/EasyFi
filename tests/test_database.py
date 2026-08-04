@@ -337,8 +337,8 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(overview.paid_minutes, 780)
         self.assertEqual(overview.gross_earned_cents, 29_200)
         self.assertEqual(overview.payments_received_cents, 20_000)
-        self.assertEqual(overview.amount_owed_cents, 10_000)
-        self.assertEqual(overview.overpaid_cents, 800)
+        self.assertEqual(overview.amount_owed_cents, 28_400)
+        self.assertEqual(overview.overpaid_cents, 0)
         self.assertEqual(overview.previous_paid_minutes, 480)
         self.assertEqual(overview.previous_gross_earned_cents, 19_200)
         self.assertEqual(overview.previous_amount_owed_cents, 19_200)
@@ -349,8 +349,65 @@ class DatabaseTests(unittest.TestCase):
             income_source_id=main_source.id,
         )
         self.assertEqual(main_only.gross_earned_cents, 19_200)
-        self.assertEqual(main_only.amount_owed_cents, 0)
-        self.assertEqual(main_only.overpaid_cents, 800)
+        self.assertEqual(main_only.amount_owed_cents, 18_400)
+        self.assertEqual(main_only.overpaid_cents, 0)
+
+    def test_overview_carries_unpaid_wages_forward_and_applies_current_payment(self) -> None:
+        source_id = self.database.add_income_source(
+            name="Cumulative balance employer",
+            hourly_rate_cents=10_000,
+            tax_rate_bps=0,
+            overtime_after_minutes=6000,
+            overtime_multiplier_milli=1500,
+        )
+
+        def save_shift(work_date: date, hours: int) -> None:
+            calculation = calculate_shift(
+                clock_in="09:00",
+                clock_out=f"{9 + hours:02d}:00",
+                break_durations=(),
+                hourly_rate_cents=10_000,
+                tax_rate_bps=0,
+                overtime_after_minutes=6000,
+            )
+            self.database.save_shift(
+                ShiftToSave(
+                    income_source_id=source_id,
+                    work_date=work_date,
+                    clock_in="09:00",
+                    clock_out=f"{9 + hours:02d}:00",
+                    break_durations=(),
+                    hourly_rate_cents=10_000,
+                    tax_rate_bps=0,
+                    overtime_after_minutes=6000,
+                    overtime_multiplier_milli=1500,
+                    calculation=calculation,
+                )
+            )
+
+        save_shift(date(2026, 7, 17), 3)  # $300 in week one
+        save_shift(date(2026, 7, 24), 3)  # $300 in week two
+        save_shift(date(2026, 7, 31), 4)  # $400 in the current week
+        self.database.save_payment(
+            PaymentToSave(
+                income_source_id=source_id,
+                paid_on=date(2026, 8, 3),
+                work_week_reference_date=date(2026, 8, 3),
+                amount_cents=50_000,
+            )
+        )
+
+        overview = self.database.overview_summary(
+            reference_date=date(2026, 8, 3),
+            income_source_id=source_id,
+        )
+        self.assertEqual(overview.gross_earned_cents, 40_000)
+        self.assertEqual(overview.payments_received_cents, 50_000)
+        self.assertEqual(overview.previous_amount_owed_cents, 60_000)
+        self.assertEqual(overview.amount_owed_cents, 50_000)
+        self.assertEqual(overview.overpaid_cents, 0)
+        self.assertEqual(len(overview.source_rows), 1)
+        self.assertEqual(overview.source_rows[0].amount_owed_cents, 50_000)
 
     def test_verified_backup_and_restore_preserve_recoverable_copy(self) -> None:
         backup_path = Path(self.temp_directory.name) / "manual-backup.db"
