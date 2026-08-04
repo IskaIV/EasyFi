@@ -261,6 +261,7 @@ class TimePickerDialog(tk.Toplevel):
     def __init__(self, anchor: tk.Misc, current: str, on_select) -> None:
         owner = anchor.winfo_toplevel()
         super().__init__(owner)
+        self.withdraw()
         self.owner = owner
         self._owner_click_binding: str | None = None
         try:
@@ -422,6 +423,8 @@ class TimePickerDialog(tk.Toplevel):
         return "break"
 
     def _position_below(self, anchor: tk.Misc) -> None:
+        anchor.update_idletasks()
+        self.update_idletasks()
         x = anchor.winfo_rootx()
         y = anchor.winfo_rooty() + anchor.winfo_height() + 3
         width = self.winfo_reqwidth()
@@ -431,7 +434,8 @@ class TimePickerDialog(tk.Toplevel):
         x = min(x, screen_width - width - 8)
         if y + height > screen_height - 8:
             y = anchor.winfo_rooty() - height - 3
-        self.geometry(f"+{max(8, x)}+{max(8, y)}")
+        self.geometry(f"{width}x{height}+{max(8, x)}+{max(8, y)}")
+        self.deiconify()
 
     def _close_if_unfocused(self) -> None:
         if not self.winfo_exists():
