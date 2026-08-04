@@ -89,6 +89,7 @@ class PaymentSummary:
     week_start: date
     week_end: date
     pay_period_weeks: int
+    opening_balance_cents: int
     gross_earned_cents: int
     payments_received_cents: int
     amount_owed_cents: int
@@ -759,6 +760,14 @@ class Database:
                     week_end.isoformat(),
                 ),
             ).fetchone()["total"]
+            earned_before_period = connection.execute(
+                """
+                SELECT COALESCE(SUM(gross_pay_cents), 0) AS total
+                FROM shifts
+                WHERE income_source_id = ? AND work_date < ?
+                """,
+                (income_source_id, period_start.isoformat()),
+            ).fetchone()["total"]
             received = connection.execute(
                 """
                 SELECT COALESCE(SUM(amount_cents), 0) AS total
@@ -773,17 +782,30 @@ class Database:
                     pay_period_weeks,
                 ),
             ).fetchone()["total"]
+            allocations = self._payment_allocations_by_week(
+                connection,
+                start_weekday=period_start.weekday(),
+                income_source_id=income_source_id,
+            )
+            payments_before_period = sum(
+                amount_cents
+                for (source_id, allocated_week), amount_cents in allocations.items()
+                if source_id == income_source_id and allocated_week < period_start
+            )
         gross = int(earned)
         payments = int(received)
+        opening_balance = int(earned_before_period) - payments_before_period
+        ending_balance = opening_balance + gross - payments
         return PaymentSummary(
             income_source_id=income_source_id,
             week_start=period_start,
             week_end=week_end,
             pay_period_weeks=pay_period_weeks,
+            opening_balance_cents=opening_balance,
             gross_earned_cents=gross,
             payments_received_cents=payments,
-            amount_owed_cents=max(gross - payments, 0),
-            overpaid_cents=max(payments - gross, 0),
+            amount_owed_cents=max(ending_balance, 0),
+            overpaid_cents=max(-ending_balance, 0),
         )
 
     def has_duplicate_payment(

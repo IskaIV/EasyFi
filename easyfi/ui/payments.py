@@ -38,6 +38,7 @@ class PaymentsPage(ttk.Frame):
         self.notes_var = tk.StringVar()
         self.status_var = tk.StringVar()
         self.balance_status_var = tk.StringVar(value="No wages recorded")
+        self.opening_balance_var = tk.StringVar(value="$0.00")
         self.gross_var = tk.StringVar(value="$0.00")
         self.received_var = tk.StringVar(value="$0.00")
         self.owed_var = tk.StringVar(value="$0.00")
@@ -181,6 +182,7 @@ class PaymentsPage(ttk.Frame):
             row=1, column=0, columnspan=2, sticky="ew", pady=(14, 12)
         )
         rows = (
+            ("Previous balance", self.opening_balance_var, "Money.TLabel"),
             ("Gross wages earned", self.gross_var, "MoneyStrong.TLabel"),
             ("Employer payments", self.received_var, "Money.TLabel"),
             ("Amount owed", self.owed_var, "MoneyStrong.TLabel"),
@@ -195,10 +197,10 @@ class PaymentsPage(ttk.Frame):
             )
         ttk.Label(
             panel,
-            text="Amount owed uses gross wages. Estimated tax and take-home do not reduce what the employer owes.",
+            text="Amount owed includes the previous unpaid balance plus gross wages in this pay period, minus employer payments.",
             style="Field.TLabel",
             wraplength=280,
-        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(16, 0))
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(16, 0))
 
     def _build_payment_history(self) -> None:
         panel = ttk.Frame(self, style="Card.TFrame", padding=18)
@@ -334,11 +336,16 @@ class PaymentsPage(ttk.Frame):
             f"{summary.week_start.strftime('%b %d')} – "
             f"{summary.week_end.strftime('%b %d, %Y')}"
         )
+        self.opening_balance_var.set(format_money(summary.opening_balance_cents))
         self.gross_var.set(format_money(summary.gross_earned_cents))
         self.received_var.set(format_money(summary.payments_received_cents))
         self.owed_var.set(format_money(summary.amount_owed_cents))
         self.overpaid_var.set(format_money(summary.overpaid_cents))
-        if summary.gross_earned_cents == 0 and summary.payments_received_cents == 0:
+        if (
+            summary.opening_balance_cents == 0
+            and summary.gross_earned_cents == 0
+            and summary.payments_received_cents == 0
+        ):
             status, color = "No wages recorded", MUTED
         elif summary.amount_owed_cents > 0:
             status, color = "Payment still owed", ERROR
@@ -353,6 +360,7 @@ class PaymentsPage(ttk.Frame):
         self.balance_status_var.set("Complete the source and pay period")
         self.balance_status_label.configure(foreground=MUTED)
         for variable in (
+            self.opening_balance_var,
             self.gross_var,
             self.received_var,
             self.owed_var,

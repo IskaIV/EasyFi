@@ -364,6 +364,88 @@ class DatabaseTests(unittest.TestCase):
         self.assertIn("work_week_reference_date", columns)
         self.assertIn("pay_period_weeks", columns)
 
+    def test_payment_summary_adds_prior_unpaid_balance_to_selected_period(self) -> None:
+        source_id = self.database.add_income_source(
+            name="Carry-forward employer",
+            hourly_rate_cents=20_500,
+            tax_rate_bps=0,
+            overtime_after_minutes=6000,
+            overtime_multiplier_milli=1500,
+        )
+        prior_calculation = calculate_shift(
+            clock_in="09:00",
+            clock_out="10:00",
+            break_durations=(),
+            hourly_rate_cents=20_500,
+            tax_rate_bps=0,
+            overtime_after_minutes=6000,
+        )
+        self.database.save_shift(
+            ShiftToSave(
+                income_source_id=source_id,
+                work_date=date(2026, 5, 21),
+                clock_in="09:00",
+                clock_out="10:00",
+                break_durations=(),
+                hourly_rate_cents=20_500,
+                tax_rate_bps=0,
+                overtime_after_minutes=6000,
+                overtime_multiplier_milli=1500,
+                calculation=prior_calculation,
+            )
+        )
+        self.database.save_payment(
+            PaymentToSave(
+                income_source_id=source_id,
+                paid_on=date(2026, 5, 27),
+                work_week_reference_date=date(2026, 5, 27),
+                amount_cents=10_000,
+            )
+        )
+
+        current_calculation = calculate_shift(
+            clock_in="09:00",
+            clock_out="10:00",
+            break_durations=(),
+            hourly_rate_cents=285_866,
+            tax_rate_bps=0,
+            overtime_after_minutes=6000,
+        )
+        self.database.save_shift(
+            ShiftToSave(
+                income_source_id=source_id,
+                work_date=date(2026, 6, 1),
+                clock_in="09:00",
+                clock_out="10:00",
+                break_durations=(),
+                hourly_rate_cents=285_866,
+                tax_rate_bps=0,
+                overtime_after_minutes=6000,
+                overtime_multiplier_milli=1500,
+                calculation=current_calculation,
+            )
+        )
+        self.database.save_payment(
+            PaymentToSave(
+                income_source_id=source_id,
+                paid_on=date(2026, 6, 24),
+                work_week_reference_date=date(2026, 6, 24),
+                amount_cents=100_000,
+                pay_period_weeks=4,
+            )
+        )
+
+        summary = self.database.payment_summary(
+            income_source_id=source_id,
+            reference_date=date(2026, 6, 24),
+            pay_period_weeks=4,
+        )
+        self.assertEqual(summary.opening_balance_cents, 10_500)
+        self.assertEqual(summary.gross_earned_cents, 285_866)
+        self.assertEqual(summary.payments_received_cents, 100_000)
+        self.assertEqual(summary.amount_owed_cents, 196_366)
+        self.assertEqual(summary.overpaid_cents, 0)
+
     def test_overview_aggregates_sources_without_offsetting_employer_balances(self) -> None:
         main_source = self.database.list_income_sources()[0]
         self.database.save_shift(

@@ -54,6 +54,10 @@ EasyFi includes that week and the immediately preceding weeks in the pay-period
 comparison. Overview applies the payment to covered weekly wages from oldest to
 newest while counting the payment only once in the cumulative balance.
 
+The Payments balance also carries forward any unpaid amount from before the
+selected pay period. Its calculation is shown as previous balance plus current
+pay-period gross wages, minus payments assigned to the selected period.
+
 > **Tax notice:** Tax percentages in EasyFi are user-configured estimates for
 > planning purposes. They are not tax-filing or financial advice.
 
