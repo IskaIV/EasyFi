@@ -13,9 +13,21 @@ calculate its pay, save it to SQLite, and view it after restarting the app.
 - Weekly overtime threshold and multiplier
 - Live gross, tax, and estimated take-home calculation
 - Local SQLite persistence and a recent-shifts table
+- Edit or delete saved shifts with automatic weekly overtime recalculation
+- Duplicate-shift warning before saving matching entries
+- Normalized clock times and guarded date, rate, tax, and break inputs
 - No network requests, accounts, or cloud services
 
 Tax values are user-configured estimates and are not tax-filing advice.
+
+For the planned Payments screen, EasyFi defines employer balance as:
+
+```text
+amount owed = gross earned wages - employer payments received
+```
+
+Estimated taxes and take-home pay will be shown separately and will not reduce
+the employer's gross amount owed.
 
 ## Run locally
 

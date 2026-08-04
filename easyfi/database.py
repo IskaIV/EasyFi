@@ -9,7 +9,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Iterator, Sequence
 
-from .calculations import ShiftCalculation
+from .calculations import ShiftCalculation, calculate_shift, work_week_bounds
 from .paths import database_path
 
 
@@ -39,6 +39,21 @@ class ShiftToSave:
     overtime_multiplier_milli: int
     calculation: ShiftCalculation
     notes: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ShiftRecord:
+    id: int
+    income_source_id: int
+    work_date: date
+    clock_in: str
+    clock_out: str
+    break_durations: tuple[int, ...]
+    hourly_rate_cents: int
+    tax_rate_bps: int
+    overtime_after_minutes: int
+    overtime_multiplier_milli: int
+    notes: str
 
 
 class Database:
@@ -180,18 +195,35 @@ class Database:
         *,
         income_source_id: int,
         week_start: date,
-        through_date: date,
+        work_date: date,
+        clock_in: str,
+        exclude_shift_id: int | None = None,
     ) -> int:
         with self.connect() as connection:
+            parameters: list[object] = [
+                income_source_id,
+                week_start.isoformat(),
+                work_date.isoformat(),
+                work_date.isoformat(),
+                clock_in,
+            ]
+            same_time_clause = "clock_in <= ?"
+            if exclude_shift_id is not None:
+                same_time_clause = "(clock_in < ? OR (clock_in = ? AND id < ?))"
+                parameters.extend([clock_in, exclude_shift_id])
             row = connection.execute(
-                """
+                f"""
                 SELECT COALESCE(SUM(paid_minutes), 0) AS total
                 FROM shifts
                 WHERE income_source_id = ?
                   AND work_date >= ?
-                  AND work_date <= ?
+                  AND (
+                    work_date < ?
+                    OR (work_date = ? AND {same_time_clause})
+                  )
+                  AND id != COALESCE(?, -1)
                 """,
-                (income_source_id, week_start.isoformat(), through_date.isoformat()),
+                (*parameters, exclude_shift_id),
             ).fetchone()
         return int(row["total"])
 
@@ -243,7 +275,242 @@ class Database:
                     for index, duration in enumerate(shift.break_durations)
                 ],
             )
+            self._recalculate_affected_week(
+                connection, shift.income_source_id, shift.work_date
+            )
         return shift_id
+
+    def get_shift(self, shift_id: int) -> ShiftRecord | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, income_source_id, work_date, clock_in, clock_out,
+                       hourly_rate_cents, tax_rate_bps, overtime_after_minutes,
+                       overtime_multiplier_milli, notes
+                FROM shifts
+                WHERE id = ?
+                """,
+                (shift_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            breaks = connection.execute(
+                """
+                SELECT duration_minutes
+                FROM shift_breaks
+                WHERE shift_id = ? AND paid = 0
+                ORDER BY sort_order, id
+                """,
+                (shift_id,),
+            ).fetchall()
+        return ShiftRecord(
+            id=int(row["id"]),
+            income_source_id=int(row["income_source_id"]),
+            work_date=date.fromisoformat(row["work_date"]),
+            clock_in=row["clock_in"],
+            clock_out=row["clock_out"],
+            break_durations=tuple(int(item["duration_minutes"]) for item in breaks),
+            hourly_rate_cents=int(row["hourly_rate_cents"]),
+            tax_rate_bps=int(row["tax_rate_bps"]),
+            overtime_after_minutes=int(row["overtime_after_minutes"]),
+            overtime_multiplier_milli=int(row["overtime_multiplier_milli"]),
+            notes=row["notes"],
+        )
+
+    def update_shift(self, shift_id: int, shift: ShiftToSave) -> None:
+        calc = shift.calculation
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT income_source_id, work_date FROM shifts WHERE id = ?",
+                (shift_id,),
+            ).fetchone()
+            if existing is None:
+                raise ValueError("The selected shift no longer exists.")
+
+            old_source_id = int(existing["income_source_id"])
+            old_work_date = date.fromisoformat(existing["work_date"])
+            connection.execute(
+                """
+                UPDATE shifts
+                SET income_source_id = ?, work_date = ?, clock_in = ?, clock_out = ?,
+                    hourly_rate_cents = ?, tax_rate_bps = ?,
+                    overtime_after_minutes = ?, overtime_multiplier_milli = ?,
+                    elapsed_minutes = ?, break_minutes = ?, paid_minutes = ?,
+                    regular_minutes = ?, overtime_minutes = ?, regular_pay_cents = ?,
+                    overtime_pay_cents = ?, gross_pay_cents = ?, tax_cents = ?,
+                    net_pay_cents = ?, notes = ?
+                WHERE id = ?
+                """,
+                (
+                    shift.income_source_id,
+                    shift.work_date.isoformat(),
+                    shift.clock_in,
+                    shift.clock_out,
+                    shift.hourly_rate_cents,
+                    shift.tax_rate_bps,
+                    shift.overtime_after_minutes,
+                    shift.overtime_multiplier_milli,
+                    calc.elapsed_minutes,
+                    calc.break_minutes,
+                    calc.paid_minutes,
+                    calc.regular_minutes,
+                    calc.overtime_minutes,
+                    calc.regular_pay_cents,
+                    calc.overtime_pay_cents,
+                    calc.gross_pay_cents,
+                    calc.tax_cents,
+                    calc.net_pay_cents,
+                    shift.notes.strip(),
+                    shift_id,
+                ),
+            )
+            connection.execute("DELETE FROM shift_breaks WHERE shift_id = ?", (shift_id,))
+            connection.executemany(
+                """
+                INSERT INTO shift_breaks(shift_id, duration_minutes, paid, sort_order)
+                VALUES (?, ?, 0, ?)
+                """,
+                [
+                    (shift_id, duration, index)
+                    for index, duration in enumerate(shift.break_durations)
+                ],
+            )
+
+            affected = {
+                (old_source_id, old_work_date),
+                (shift.income_source_id, shift.work_date),
+            }
+            for income_source_id, work_date_value in affected:
+                self._recalculate_affected_week(
+                    connection, income_source_id, work_date_value
+                )
+
+    def delete_shift(self, shift_id: int) -> bool:
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT income_source_id, work_date FROM shifts WHERE id = ?",
+                (shift_id,),
+            ).fetchone()
+            if existing is None:
+                return False
+            connection.execute("DELETE FROM shifts WHERE id = ?", (shift_id,))
+            self._recalculate_affected_week(
+                connection,
+                int(existing["income_source_id"]),
+                date.fromisoformat(existing["work_date"]),
+            )
+        return True
+
+    def has_duplicate_shift(
+        self,
+        *,
+        income_source_id: int,
+        work_date: date,
+        clock_in: str,
+        clock_out: str,
+        exclude_shift_id: int | None = None,
+    ) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM shifts
+                WHERE income_source_id = ?
+                  AND work_date = ?
+                  AND clock_in = ?
+                  AND clock_out = ?
+                  AND id != COALESCE(?, -1)
+                LIMIT 1
+                """,
+                (
+                    income_source_id,
+                    work_date.isoformat(),
+                    clock_in,
+                    clock_out,
+                    exclude_shift_id,
+                ),
+            ).fetchone()
+        return row is not None
+
+    def _recalculate_affected_week(
+        self,
+        connection: sqlite3.Connection,
+        income_source_id: int,
+        reference_date: date,
+    ) -> None:
+        start_weekday = self._get_setting_int(connection, "work_week_start", 3)
+        week_start, week_end = work_week_bounds(reference_date, start_weekday)
+        rows = connection.execute(
+            """
+            SELECT id, clock_in, clock_out, hourly_rate_cents, tax_rate_bps,
+                   overtime_after_minutes, overtime_multiplier_milli
+            FROM shifts
+            WHERE income_source_id = ?
+              AND work_date BETWEEN ? AND ?
+            ORDER BY work_date, clock_in, id
+            """,
+            (income_source_id, week_start.isoformat(), week_end.isoformat()),
+        ).fetchall()
+
+        prior_minutes = 0
+        for row in rows:
+            breaks = connection.execute(
+                """
+                SELECT duration_minutes
+                FROM shift_breaks
+                WHERE shift_id = ? AND paid = 0
+                ORDER BY sort_order, id
+                """,
+                (row["id"],),
+            ).fetchall()
+            calculation = calculate_shift(
+                clock_in=row["clock_in"],
+                clock_out=row["clock_out"],
+                break_durations=(int(item["duration_minutes"]) for item in breaks),
+                hourly_rate_cents=int(row["hourly_rate_cents"]),
+                tax_rate_bps=int(row["tax_rate_bps"]),
+                prior_week_minutes=prior_minutes,
+                overtime_after_minutes=int(row["overtime_after_minutes"]),
+                overtime_multiplier_milli=int(row["overtime_multiplier_milli"]),
+            )
+            connection.execute(
+                """
+                UPDATE shifts
+                SET elapsed_minutes = ?, break_minutes = ?, paid_minutes = ?,
+                    regular_minutes = ?, overtime_minutes = ?, regular_pay_cents = ?,
+                    overtime_pay_cents = ?, gross_pay_cents = ?, tax_cents = ?,
+                    net_pay_cents = ?
+                WHERE id = ?
+                """,
+                (
+                    calculation.elapsed_minutes,
+                    calculation.break_minutes,
+                    calculation.paid_minutes,
+                    calculation.regular_minutes,
+                    calculation.overtime_minutes,
+                    calculation.regular_pay_cents,
+                    calculation.overtime_pay_cents,
+                    calculation.gross_pay_cents,
+                    calculation.tax_cents,
+                    calculation.net_pay_cents,
+                    row["id"],
+                ),
+            )
+            prior_minutes += calculation.paid_minutes
+
+    @staticmethod
+    def _get_setting_int(
+        connection: sqlite3.Connection, key: str, default: int
+    ) -> int:
+        row = connection.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,)
+        ).fetchone()
+        if row is None:
+            return default
+        try:
+            return int(row["value"])
+        except ValueError:
+            return default
 
     def list_recent_shifts(self, limit: int = 12) -> Sequence[sqlite3.Row]:
         with self.connect() as connection:

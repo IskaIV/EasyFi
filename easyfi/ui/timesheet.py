@@ -6,13 +6,14 @@ import tkinter as tk
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from tkinter import font as tkfont
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 from ..calculations import (
     ShiftCalculation,
     calculate_shift,
     format_minutes,
     format_money,
+    parse_clock_time,
     work_week_bounds,
 )
 from ..database import Database, IncomeSource, ShiftToSave
@@ -38,7 +39,16 @@ class TimesheetApp:
         self.sources: list[IncomeSource] = []
         self.source_by_label: dict[str, IncomeSource] = {}
         self.break_variables: list[tk.StringVar] = []
+        self.editing_shift_id: int | None = None
+        self.editing_source_id: int | None = None
+        self.editing_overtime_after_minutes: int | None = None
+        self.editing_overtime_multiplier_milli: int | None = None
 
+        self.form_title_var = tk.StringVar(value="Add a shift")
+        self.form_subtitle_var = tk.StringVar(
+            value="Enter the times. EasyFi calculates the rest."
+        )
+        self.save_button_var = tk.StringVar(value="Add shift")
         self.date_var = tk.StringVar(value=date.today().isoformat())
         self.source_var = tk.StringVar()
         self.clock_in_var = tk.StringVar(value="08:30")
@@ -136,6 +146,13 @@ class TimesheetApp:
             padding=(14, 8),
         )
         style.configure(
+            "Danger.TButton",
+            background="#FFFFFF",
+            foreground=ERROR,
+            bordercolor="#D9B9B9",
+            padding=(14, 8),
+        )
+        style.configure(
             "Sidebar.TButton",
             background=SIDEBAR_BACKGROUND,
             foreground="#DCEDE2",
@@ -187,12 +204,12 @@ class TimesheetApp:
         header = ttk.Frame(content, style="App.TFrame")
         header.grid(row=0, column=0, sticky="ew", pady=(0, 18))
         header.columnconfigure(0, weight=1)
-        ttk.Label(header, text="Add a shift", style="Title.TLabel").grid(
+        ttk.Label(header, textvariable=self.form_title_var, style="Title.TLabel").grid(
             row=0, column=0, sticky="w"
         )
         ttk.Label(
             header,
-            text="Enter the times. EasyFi calculates the rest.",
+            textvariable=self.form_subtitle_var,
             style="Subtitle.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(3, 0))
         ttk.Label(header, textvariable=self.week_var, style="Subtitle.TLabel").grid(
@@ -297,12 +314,23 @@ class TimesheetApp:
             anchor="w",
         )
         self.status_label.grid(row=0, column=0, sticky="ew")
+        self.delete_form_button = ttk.Button(
+            actions,
+            text="Delete",
+            style="Danger.TButton",
+            state="disabled",
+            command=self.delete_editing_shift,
+        )
+        self.delete_form_button.grid(row=0, column=1, padx=(8, 8))
         ttk.Button(
             actions, text="Clear", style="Secondary.TButton", command=self.clear_form
-        ).grid(row=0, column=1, padx=(8, 8))
+        ).grid(row=0, column=2, padx=(0, 8))
         ttk.Button(
-            actions, text="Add shift", style="Primary.TButton", command=self.save_shift
-        ).grid(row=0, column=2)
+            actions,
+            textvariable=self.save_button_var,
+            style="Primary.TButton",
+            command=self.save_shift,
+        ).grid(row=0, column=3)
 
     def _build_summary(self, parent: ttk.Frame) -> None:
         panel = ttk.Frame(parent, style="Panel.TFrame", padding=20)
@@ -359,9 +387,24 @@ class TimesheetApp:
         panel.grid(row=2, column=0, sticky="nsew", pady=(18, 0))
         panel.columnconfigure(0, weight=1)
         panel.rowconfigure(1, weight=1)
-        ttk.Label(panel, text="Recent shifts", style="PanelTitle.TLabel").grid(
-            row=0, column=0, sticky="w", pady=(0, 10)
-        )
+        recent_header = ttk.Frame(panel, style="Panel.TFrame")
+        recent_header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        recent_header.columnconfigure(0, weight=1)
+        ttk.Label(
+            recent_header, text="Recent shifts", style="PanelTitle.TLabel"
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            recent_header,
+            text="Edit selected",
+            style="Secondary.TButton",
+            command=self.edit_selected_shift,
+        ).grid(row=0, column=1, padx=(8, 8))
+        ttk.Button(
+            recent_header,
+            text="Delete selected",
+            style="Danger.TButton",
+            command=self.delete_selected_shift,
+        ).grid(row=0, column=2)
         columns = ("date", "source", "time", "paid", "gross", "take_home")
         self.shift_table = ttk.Treeview(
             panel, columns=columns, show="headings", height=6
@@ -386,6 +429,7 @@ class TimesheetApp:
             self.shift_table.heading(column, text=headings[column])
             self.shift_table.column(column, width=widths[column], anchor="w")
         self.shift_table.grid(row=1, column=0, sticky="nsew")
+        self.shift_table.bind("<Double-1>", lambda _event: self.edit_selected_shift())
 
     def _labeled_entry(
         self,
@@ -472,7 +516,17 @@ class TimesheetApp:
 
     def _form_values(
         self,
-    ) -> tuple[date, IncomeSource, tuple[int, ...], int, int, int, ShiftCalculation]:
+    ) -> tuple[
+        date,
+        IncomeSource,
+        str,
+        str,
+        tuple[int, ...],
+        int,
+        int,
+        int,
+        ShiftCalculation,
+    ]:
         try:
             work_date = date.fromisoformat(self.date_var.get().strip())
         except ValueError as exc:
@@ -498,32 +552,67 @@ class TimesheetApp:
         except (InvalidOperation, ValueError) as exc:
             raise ValueError("Rate, tax, and breaks must be valid numbers.") from exc
 
+        if hourly_rate_cents <= 0:
+            raise ValueError("Hourly rate must be greater than $0.00.")
+        if not 0 <= tax_rate_bps <= 10_000:
+            raise ValueError("Estimated tax must be between 0% and 100%.")
+        if any(duration < 0 or duration > 24 * 60 for duration in breaks):
+            raise ValueError("Each break must be between 0 and 1,440 minutes.")
+        breaks = tuple(duration for duration in breaks if duration > 0)
+
+        clock_in = self._normalize_clock_time(self.clock_in_var.get())
+        clock_out = self._normalize_clock_time(self.clock_out_var.get())
+
         work_week_start = self.database.get_setting_int("work_week_start", 3)
         week_start, _week_end = work_week_bounds(work_date, work_week_start)
         prior_minutes = self.database.prior_paid_minutes(
             income_source_id=source.id,
             week_start=week_start,
-            through_date=work_date,
+            work_date=work_date,
+            clock_in=clock_in,
+            exclude_shift_id=self.editing_shift_id,
         )
+        overtime_after, overtime_multiplier = self._current_overtime_rules(source)
         calculation = calculate_shift(
-            clock_in=self.clock_in_var.get(),
-            clock_out=self.clock_out_var.get(),
+            clock_in=clock_in,
+            clock_out=clock_out,
             break_durations=breaks,
             hourly_rate_cents=hourly_rate_cents,
             tax_rate_bps=tax_rate_bps,
             prior_week_minutes=prior_minutes,
-            overtime_after_minutes=source.overtime_after_minutes,
-            overtime_multiplier_milli=source.overtime_multiplier_milli,
+            overtime_after_minutes=overtime_after,
+            overtime_multiplier_milli=overtime_multiplier,
         )
         return (
             work_date,
             source,
+            clock_in,
+            clock_out,
             breaks,
             hourly_rate_cents,
             tax_rate_bps,
             prior_minutes,
             calculation,
         )
+
+    @staticmethod
+    def _normalize_clock_time(value: str) -> str:
+        minutes = parse_clock_time(value)
+        hours, remainder = divmod(minutes, 60)
+        return f"{hours:02d}:{remainder:02d}"
+
+    def _current_overtime_rules(self, source: IncomeSource) -> tuple[int, int]:
+        if (
+            self.editing_shift_id is not None
+            and self.editing_source_id == source.id
+            and self.editing_overtime_after_minutes is not None
+            and self.editing_overtime_multiplier_milli is not None
+        ):
+            return (
+                self.editing_overtime_after_minutes,
+                self.editing_overtime_multiplier_milli,
+            )
+        return source.overtime_after_minutes, source.overtime_multiplier_milli
 
     def refresh_calculation(self) -> None:
         self._refresh_week_label()
@@ -583,37 +672,69 @@ class TimesheetApp:
             (
                 work_date,
                 source,
+                clock_in,
+                clock_out,
                 breaks,
                 hourly_rate_cents,
                 tax_rate_bps,
                 _prior_minutes,
                 calculation,
             ) = self._form_values()
-            shift_id = self.database.save_shift(
-                ShiftToSave(
-                    income_source_id=source.id,
-                    work_date=work_date,
-                    clock_in=self.clock_in_var.get().strip(),
-                    clock_out=self.clock_out_var.get().strip(),
-                    break_durations=breaks,
-                    hourly_rate_cents=hourly_rate_cents,
-                    tax_rate_bps=tax_rate_bps,
-                    overtime_after_minutes=source.overtime_after_minutes,
-                    overtime_multiplier_milli=source.overtime_multiplier_milli,
-                    calculation=calculation,
-                )
+            if self.database.has_duplicate_shift(
+                income_source_id=source.id,
+                work_date=work_date,
+                clock_in=clock_in,
+                clock_out=clock_out,
+                exclude_shift_id=self.editing_shift_id,
+            ) and not messagebox.askyesno(
+                "Possible duplicate shift",
+                "A shift with the same date, income source, clock-in, and "
+                "clock-out already exists. Save it anyway?",
+                parent=self.root,
+            ):
+                self._set_status("Duplicate shift was not saved.", error=True)
+                return
+
+            overtime_after, overtime_multiplier = self._current_overtime_rules(source)
+            shift = ShiftToSave(
+                income_source_id=source.id,
+                work_date=work_date,
+                clock_in=clock_in,
+                clock_out=clock_out,
+                break_durations=breaks,
+                hourly_rate_cents=hourly_rate_cents,
+                tax_rate_bps=tax_rate_bps,
+                overtime_after_minutes=overtime_after,
+                overtime_multiplier_milli=overtime_multiplier,
+                calculation=calculation,
             )
+            if self.editing_shift_id is None:
+                shift_id = self.database.save_shift(shift)
+                success_message = f"Shift #{shift_id} saved locally."
+            else:
+                shift_id = self.editing_shift_id
+                self.database.update_shift(shift_id, shift)
+                success_message = f"Shift #{shift_id} updated."
         except (ValueError, OSError) as exc:
-            self.status_label.configure(foreground=ERROR)
-            self.status_var.set(str(exc))
+            self._set_status(str(exc), error=True)
             return
 
-        self.status_label.configure(foreground=PRIMARY)
-        self.status_var.set(f"Shift #{shift_id} saved locally.")
+        self._set_status(success_message)
         self.refresh_recent_shifts()
-        self.refresh_calculation()
+        self._reset_form(clear_status=False)
 
     def clear_form(self) -> None:
+        self._reset_form(clear_status=True)
+
+    def _reset_form(self, *, clear_status: bool) -> None:
+        self.editing_shift_id = None
+        self.editing_source_id = None
+        self.editing_overtime_after_minutes = None
+        self.editing_overtime_multiplier_milli = None
+        self.form_title_var.set("Add a shift")
+        self.form_subtitle_var.set("Enter the times. EasyFi calculates the rest.")
+        self.save_button_var.set("Add shift")
+        self.delete_form_button.configure(state="disabled")
         self.date_var.set(date.today().isoformat())
         self.clock_in_var.set("08:30")
         self.clock_out_var.set("17:00")
@@ -621,8 +742,116 @@ class TimesheetApp:
             child.destroy()
         self.break_variables.clear()
         self.add_break("30")
+        labels = list(self.source_by_label)
+        if labels:
+            self.source_var.set(labels[0])
         self._apply_selected_source()
-        self.status_var.set("")
+        if clear_status:
+            self.status_var.set("")
+        self.refresh_calculation()
+
+    def edit_selected_shift(self) -> None:
+        shift_id = self._selected_shift_id()
+        if shift_id is None:
+            self._set_status("Select a shift to edit.", error=True)
+            return
+        shift = self.database.get_shift(shift_id)
+        if shift is None:
+            self._set_status("The selected shift no longer exists.", error=True)
+            self.refresh_recent_shifts()
+            return
+
+        source_label = next(
+            (
+                label
+                for label, source in self.source_by_label.items()
+                if source.id == shift.income_source_id
+            ),
+            None,
+        )
+        if source_label is None:
+            self._set_status(
+                "The shift's income source is unavailable. Restore it before editing.",
+                error=True,
+            )
+            return
+
+        self.editing_shift_id = shift.id
+        self.editing_source_id = shift.income_source_id
+        self.editing_overtime_after_minutes = shift.overtime_after_minutes
+        self.editing_overtime_multiplier_milli = shift.overtime_multiplier_milli
+        self.form_title_var.set(f"Edit shift #{shift.id}")
+        self.form_subtitle_var.set(
+            "Update the shift and save. Weekly overtime will be recalculated."
+        )
+        self.save_button_var.set("Save changes")
+        self.delete_form_button.configure(state="normal")
+
+        self.date_var.set(shift.work_date.isoformat())
+        self.source_var.set(source_label)
+        self.clock_in_var.set(shift.clock_in)
+        self.clock_out_var.set(shift.clock_out)
+        self.rate_var.set(f"{shift.hourly_rate_cents / 100:.2f}")
+        self.tax_var.set(f"{shift.tax_rate_bps / 100:.2f}")
+        for child in self.breaks_frame.winfo_children():
+            child.destroy()
+        self.break_variables.clear()
+        for duration in shift.break_durations:
+            self.add_break(str(duration))
+        self._set_status(f"Editing shift #{shift.id}.")
+        self.refresh_calculation()
+
+    def delete_selected_shift(self) -> None:
+        shift_id = self._selected_shift_id()
+        if shift_id is None:
+            self._set_status("Select a shift to delete.", error=True)
+            return
+        self._delete_shift(shift_id)
+
+    def delete_editing_shift(self) -> None:
+        if self.editing_shift_id is None:
+            return
+        self._delete_shift(self.editing_shift_id)
+
+    def _delete_shift(self, shift_id: int) -> None:
+        shift = self.database.get_shift(shift_id)
+        if shift is None:
+            self._set_status("The selected shift no longer exists.", error=True)
+            self.refresh_recent_shifts()
+            return
+        if not messagebox.askyesno(
+            "Delete shift?",
+            f"Delete the {shift.work_date.isoformat()} shift from "
+            f"{shift.clock_in} to {shift.clock_out}?\n\n"
+            "This will recalculate overtime for the rest of that work week.",
+            icon="warning",
+            parent=self.root,
+        ):
+            return
+        if not self.database.delete_shift(shift_id):
+            self._set_status("The selected shift no longer exists.", error=True)
+            self.refresh_recent_shifts()
+            return
+
+        was_editing = self.editing_shift_id == shift_id
+        if was_editing:
+            self._reset_form(clear_status=False)
+        self._set_status(f"Shift #{shift_id} deleted.")
+        self.refresh_recent_shifts()
+        self.refresh_calculation()
+
+    def _selected_shift_id(self) -> int | None:
+        selection = self.shift_table.selection()
+        if not selection:
+            return None
+        try:
+            return int(selection[0])
+        except ValueError:
+            return None
+
+    def _set_status(self, message: str, *, error: bool = False) -> None:
+        self.status_label.configure(foreground=ERROR if error else PRIMARY)
+        self.status_var.set(message)
 
     def refresh_recent_shifts(self) -> None:
         for item in self.shift_table.get_children():
@@ -631,6 +860,7 @@ class TimesheetApp:
             self.shift_table.insert(
                 "",
                 "end",
+                iid=str(shift["id"]),
                 values=(
                     shift["work_date"],
                     shift["source_name"],
