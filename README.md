@@ -28,6 +28,7 @@ calculate its pay, save it to SQLite, and view it after restarting the app.
 - Daily automatic backups with configurable retention
 - SQLite integrity checks and complete CSV exports
 - No network requests, accounts, or cloud services
+- Per-monitor DPI awareness for crisp Windows text and controls
 
 Tax values are user-configured estimates and are not tax-filing advice.
 
@@ -50,6 +51,11 @@ cd C:\Users\iskan\Documents\repos\EasyFi
 python -m easyfi --check
 python -m easyfi
 ```
+
+EasyFi enables Windows Per-Monitor V2 DPI awareness before creating its first
+window. The development app and packaged executable therefore use native
+rendering instead of Windows bitmap scaling. The executable build should embed
+`packaging/easyfi.manifest` to preserve the same behavior.
 
 The database is created at `%LOCALAPPDATA%\EasyFi\easyfi.db`. You can select a
 different location for a run with:

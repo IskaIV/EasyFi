@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from .database import Database
+from .display import configure_windows_dpi_awareness
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,6 +31,9 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.data_dir:
         os.environ["EASYFI_DATA_DIR"] = str(args.data_dir)
+
+    # This must happen before importing the UI or constructing any Tk windows.
+    configure_windows_dpi_awareness()
 
     database = Database()
     database.initialize()
