@@ -294,7 +294,9 @@ class OverviewPage(ttk.Frame):
             )
         )
         self.payments_var.set(format_money(summary.payments_received_cents))
-        self.payments_context_var.set("Employer deposits assigned to this work week")
+        self.payments_context_var.set(
+            "Employer deposits for pay periods ending this week"
+        )
         self.owed_var.set(format_money(summary.amount_owed_cents))
         if summary.amount_owed_cents > 0:
             owed_status = "Still unpaid"

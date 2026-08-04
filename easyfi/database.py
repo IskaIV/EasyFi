@@ -16,7 +16,7 @@ from .calculations import ShiftCalculation, calculate_shift, work_week_bounds
 from .paths import database_path
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +66,7 @@ class PaymentToSave:
     paid_on: date
     work_week_reference_date: date
     amount_cents: int
+    pay_period_weeks: int = 1
     notes: str = ""
 
 
@@ -77,6 +78,7 @@ class PaymentRecord:
     paid_on: date
     work_week_start: date
     work_week_reference_date: date
+    pay_period_weeks: int
     amount_cents: int
     notes: str
 
@@ -86,6 +88,7 @@ class PaymentSummary:
     income_source_id: int
     week_start: date
     week_end: date
+    pay_period_weeks: int
     gross_earned_cents: int
     payments_received_cents: int
     amount_owed_cents: int
@@ -203,6 +206,8 @@ class Database:
                     income_source_id INTEGER REFERENCES income_sources(id),
                     work_week_start TEXT,
                     work_week_reference_date TEXT,
+                    pay_period_weeks INTEGER NOT NULL DEFAULT 1
+                        CHECK (pay_period_weeks BETWEEN 1 AND 52),
                     paid_on TEXT NOT NULL,
                     amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
                     notes TEXT NOT NULL DEFAULT '',
@@ -635,13 +640,14 @@ class Database:
                 """
                 INSERT INTO payments(
                     income_source_id, work_week_start, work_week_reference_date,
-                    paid_on, amount_cents, notes, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    pay_period_weeks, paid_on, amount_cents, notes, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payment.income_source_id,
                     week_start.isoformat(),
                     payment.work_week_reference_date.isoformat(),
+                    payment.pay_period_weeks,
                     payment.paid_on.isoformat(),
                     payment.amount_cents,
                     payment.notes.strip(),
@@ -659,6 +665,7 @@ class Database:
                        payments.work_week_start,
                        COALESCE(payments.work_week_reference_date,
                                 payments.work_week_start) AS reference_date,
+                       payments.pay_period_weeks,
                        payments.amount_cents, payments.notes
                 FROM payments
                 JOIN income_sources ON income_sources.id = payments.income_source_id
@@ -678,14 +685,15 @@ class Database:
                 """
                 UPDATE payments
                 SET income_source_id = ?, work_week_start = ?,
-                    work_week_reference_date = ?, paid_on = ?, amount_cents = ?,
-                    notes = ?
+                    work_week_reference_date = ?, pay_period_weeks = ?,
+                    paid_on = ?, amount_cents = ?, notes = ?
                 WHERE id = ?
                 """,
                 (
                     payment.income_source_id,
                     week_start.isoformat(),
                     payment.work_week_reference_date.isoformat(),
+                    payment.pay_period_weeks,
                     payment.paid_on.isoformat(),
                     payment.amount_cents,
                     payment.notes.strip(),
@@ -711,6 +719,7 @@ class Database:
                        payments.work_week_start,
                        COALESCE(payments.work_week_reference_date,
                                 payments.work_week_start) AS reference_date,
+                       payments.pay_period_weeks,
                        payments.amount_cents, payments.notes
                 FROM payments
                 JOIN income_sources ON income_sources.id = payments.income_source_id
@@ -722,11 +731,20 @@ class Database:
         return [self._payment_record_from_row(row) for row in rows]
 
     def payment_summary(
-        self, *, income_source_id: int, reference_date: date
+        self,
+        *,
+        income_source_id: int,
+        reference_date: date,
+        pay_period_weeks: int = 1,
     ) -> PaymentSummary:
+        if not 1 <= pay_period_weeks <= 52:
+            raise ValueError("Pay period must be between 1 and 52 weeks.")
         with self.connect() as connection:
-            week_start, week_end = self._payment_week_bounds(
+            ending_week_start, week_end = self._payment_week_bounds(
                 connection, reference_date
+            )
+            period_start = ending_week_start - timedelta(
+                days=7 * (pay_period_weeks - 1)
             )
             earned = connection.execute(
                 """
@@ -737,7 +755,7 @@ class Database:
                 """,
                 (
                     income_source_id,
-                    week_start.isoformat(),
+                    period_start.isoformat(),
                     week_end.isoformat(),
                 ),
             ).fetchone()["total"]
@@ -745,16 +763,23 @@ class Database:
                 """
                 SELECT COALESCE(SUM(amount_cents), 0) AS total
                 FROM payments
-                WHERE income_source_id = ? AND work_week_start = ?
+                WHERE income_source_id = ?
+                  AND work_week_start = ?
+                  AND pay_period_weeks = ?
                 """,
-                (income_source_id, week_start.isoformat()),
+                (
+                    income_source_id,
+                    ending_week_start.isoformat(),
+                    pay_period_weeks,
+                ),
             ).fetchone()["total"]
         gross = int(earned)
         payments = int(received)
         return PaymentSummary(
             income_source_id=income_source_id,
-            week_start=week_start,
+            week_start=period_start,
             week_end=week_end,
+            pay_period_weeks=pay_period_weeks,
             gross_earned_cents=gross,
             payments_received_cents=payments,
             amount_owed_cents=max(gross - payments, 0),
@@ -776,6 +801,7 @@ class Database:
                 SELECT 1 FROM payments
                 WHERE income_source_id = ?
                   AND work_week_start = ?
+                  AND pay_period_weeks = ?
                   AND paid_on = ?
                   AND amount_cents = ?
                   AND id != COALESCE(?, -1)
@@ -784,6 +810,7 @@ class Database:
                 (
                     payment.income_source_id,
                     week_start.isoformat(),
+                    payment.pay_period_weeks,
                     payment.paid_on.isoformat(),
                     payment.amount_cents,
                     exclude_payment_id,
@@ -797,6 +824,8 @@ class Database:
     ) -> None:
         if payment.amount_cents <= 0:
             raise ValueError("Payment amount must be greater than $0.00.")
+        if not 1 <= payment.pay_period_weeks <= 52:
+            raise ValueError("Pay period must be between 1 and 52 weeks.")
         source = connection.execute(
             "SELECT 1 FROM income_sources WHERE id = ?",
             (payment.income_source_id,),
@@ -821,6 +850,7 @@ class Database:
             paid_on=date.fromisoformat(row["paid_on"]),
             work_week_start=date.fromisoformat(row["work_week_start"]),
             work_week_reference_date=date.fromisoformat(row["reference_date"]),
+            pay_period_weeks=int(row["pay_period_weeks"]),
             amount_cents=int(row["amount_cents"]),
             notes=row["notes"],
         )
@@ -1376,6 +1406,11 @@ class Database:
         if "work_week_reference_date" not in columns:
             connection.execute(
                 "ALTER TABLE payments ADD COLUMN work_week_reference_date TEXT"
+            )
+        if "pay_period_weeks" not in columns:
+            connection.execute(
+                "ALTER TABLE payments "
+                "ADD COLUMN pay_period_weeks INTEGER NOT NULL DEFAULT 1"
             )
         connection.execute(
             """

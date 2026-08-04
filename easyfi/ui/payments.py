@@ -13,6 +13,11 @@ from .theme import ERROR, MUTED, PANEL_BACKGROUND, PRIMARY, SOFT_GREEN, WARNING
 from .widgets import DateInput, format_display_date, parse_display_date
 
 
+PAY_PERIOD_OPTIONS = tuple(
+    f"{weeks} {'week' if weeks == 1 else 'weeks'}" for weeks in range(1, 9)
+)
+
+
 class PaymentsPage(ttk.Frame):
     def __init__(self, parent: ttk.Frame, database: Database) -> None:
         super().__init__(parent, style="App.TFrame", padding=(26, 22))
@@ -27,6 +32,7 @@ class PaymentsPage(ttk.Frame):
         self.week_reference_var = tk.StringVar(
             value=format_display_date(date.today())
         )
+        self.pay_period_var = tk.StringVar(value=PAY_PERIOD_OPTIONS[0])
         self.week_label_var = tk.StringVar()
         self.amount_var = tk.StringVar()
         self.notes_var = tk.StringVar()
@@ -81,13 +87,16 @@ class PaymentsPage(ttk.Frame):
         )
         self.source_combo.grid(row=2, column=1, sticky="ew", padx=(8, 0))
 
-        self._field_label(panel, "Work week containing", 3, 0, top=15)
+        self._field_label(
+            panel, "Pay period ends with week containing", 3, 0, top=15
+        )
+        self._field_label(panel, "Covers", 3, 1, top=15, left=8)
         week_controls = ttk.Frame(panel, style="Panel.TFrame")
-        week_controls.grid(row=4, column=0, columnspan=2, sticky="ew")
+        week_controls.grid(row=4, column=0, sticky="ew", padx=(0, 8))
         week_controls.columnconfigure(1, weight=1)
         ttk.Button(
             week_controls,
-            text="← Previous",
+            text="←",
             style="Secondary.TButton",
             command=lambda: self.move_week(-1),
         ).grid(row=0, column=0, padx=(0, 8))
@@ -96,10 +105,17 @@ class PaymentsPage(ttk.Frame):
         )
         ttk.Button(
             week_controls,
-            text="Next →",
+            text="→",
             style="Secondary.TButton",
             command=lambda: self.move_week(1),
         ).grid(row=0, column=2, padx=(8, 0))
+        self.pay_period_combo = ttk.Combobox(
+            panel,
+            textvariable=self.pay_period_var,
+            values=PAY_PERIOD_OPTIONS,
+            state="readonly",
+        )
+        self.pay_period_combo.grid(row=4, column=1, sticky="ew", padx=(8, 0))
         ttk.Label(
             panel, textvariable=self.week_label_var, style="Field.TLabel"
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
@@ -149,7 +165,7 @@ class PaymentsPage(ttk.Frame):
         panel = ttk.Frame(parent, style="Card.TFrame", padding=20)
         panel.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
         panel.columnconfigure(0, weight=1)
-        ttk.Label(panel, text="Work-week balance", style="PanelTitle.TLabel").grid(
+        ttk.Label(panel, text="Pay-period balance", style="PanelTitle.TLabel").grid(
             row=0, column=0, columnspan=2, sticky="w"
         )
         self.balance_status_label = tk.Label(
@@ -215,7 +231,7 @@ class PaymentsPage(ttk.Frame):
         headings = {
             "paid_on": "Date paid",
             "source": "Income source",
-            "week": "Applied work week",
+            "week": "Applied pay period",
             "amount": "Amount",
             "notes": "Notes",
         }
@@ -257,6 +273,9 @@ class PaymentsPage(ttk.Frame):
         self.week_reference_var.trace_add(
             "write", lambda *_args: self.refresh_summary()
         )
+        self.pay_period_var.trace_add(
+            "write", lambda *_args: self.refresh_summary()
+        )
 
     def refresh(self) -> None:
         selected = self.sources_by_label.get(self.source_var.get())
@@ -296,8 +315,11 @@ class PaymentsPage(ttk.Frame):
         try:
             source = self._selected_source_from_form()
             reference = parse_display_date(self.week_reference_var.get())
+            pay_period_weeks = self._selected_pay_period_weeks()
             summary = self.database.payment_summary(
-                income_source_id=source.id, reference_date=reference
+                income_source_id=source.id,
+                reference_date=reference,
+                pay_period_weeks=pay_period_weeks,
             )
         except ValueError:
             self.week_label_var.set("Work week: —")
@@ -307,8 +329,10 @@ class PaymentsPage(ttk.Frame):
 
     def _show_summary(self, summary: PaymentSummary) -> None:
         self.week_label_var.set(
-            f"Work week: {summary.week_start.strftime('%a, %b %d')} – "
-            f"{summary.week_end.strftime('%a, %b %d')}"
+            f"Pay period ({summary.pay_period_weeks} "
+            f"{'week' if summary.pay_period_weeks == 1 else 'weeks'}): "
+            f"{summary.week_start.strftime('%b %d')} – "
+            f"{summary.week_end.strftime('%b %d, %Y')}"
         )
         self.gross_var.set(format_money(summary.gross_earned_cents))
         self.received_var.set(format_money(summary.payments_received_cents))
@@ -326,7 +350,7 @@ class PaymentsPage(ttk.Frame):
         self.balance_status_label.configure(foreground=color)
 
     def _show_empty_summary(self) -> None:
-        self.balance_status_var.set("Complete the source and work week")
+        self.balance_status_var.set("Complete the source and pay period")
         self.balance_status_label.configure(foreground=MUTED)
         for variable in (
             self.gross_var,
@@ -345,6 +369,7 @@ class PaymentsPage(ttk.Frame):
             reference_date = parse_display_date(self.week_reference_var.get())
         except ValueError as exc:
             raise ValueError("Work-week date must use MM/DD/YYYY format.") from exc
+        pay_period_weeks = self._selected_pay_period_weeks()
         source = self._selected_source_from_form()
         try:
             amount_cents = int(
@@ -359,6 +384,7 @@ class PaymentsPage(ttk.Frame):
             paid_on=paid_on,
             work_week_reference_date=reference_date,
             amount_cents=amount_cents,
+            pay_period_weeks=pay_period_weeks,
             notes=self.notes_var.get(),
         )
 
@@ -375,7 +401,7 @@ class PaymentsPage(ttk.Frame):
                 payment, exclude_payment_id=self.editing_payment_id
             ) and not messagebox.askyesno(
                 "Possible duplicate payment",
-                "A payment with the same source, work week, date, and amount "
+                "A payment with the same source, pay period, date, and amount "
                 "already exists. Save it anyway?",
                 parent=self.winfo_toplevel(),
             ):
@@ -446,6 +472,10 @@ class PaymentsPage(ttk.Frame):
         self.week_reference_var.set(
             format_display_date(payment.work_week_reference_date)
         )
+        self.pay_period_var.set(
+            f"{payment.pay_period_weeks} "
+            f"{'week' if payment.pay_period_weeks == 1 else 'weeks'}"
+        )
         self.amount_var.set(f"{payment.amount_cents / 100:.2f}")
         self.notes_var.set(payment.notes)
         self._set_status(f"Editing payment #{payment.id}.")
@@ -489,8 +519,11 @@ class PaymentsPage(ttk.Frame):
             self.payment_table.delete(item)
         start_weekday = self.database.get_setting_int("work_week_start", 3)
         for payment in self.database.list_payments():
-            _start, week_end = work_week_bounds(
+            _ending_start, period_end = work_week_bounds(
                 payment.work_week_start, start_weekday
+            )
+            period_start = payment.work_week_start - timedelta(
+                days=7 * (payment.pay_period_weeks - 1)
             )
             self.payment_table.insert(
                 "",
@@ -499,8 +532,9 @@ class PaymentsPage(ttk.Frame):
                 values=(
                     format_display_date(payment.paid_on),
                     payment.source_name,
-                    f"{payment.work_week_start.strftime('%b %d')} – "
-                    f"{week_end.strftime('%b %d, %Y')}",
+                    f"{period_start.strftime('%b %d')} – "
+                    f"{period_end.strftime('%b %d, %Y')} "
+                    f"({payment.pay_period_weeks}w)",
                     format_money(payment.amount_cents),
                     payment.notes,
                 ),
@@ -514,6 +548,15 @@ class PaymentsPage(ttk.Frame):
             return int(selection[0])
         except ValueError:
             return None
+
+    def _selected_pay_period_weeks(self) -> int:
+        try:
+            weeks = int(self.pay_period_var.get().split(maxsplit=1)[0])
+        except (AttributeError, ValueError) as exc:
+            raise ValueError("Choose a valid pay-period length.") from exc
+        if not 1 <= weeks <= 8:
+            raise ValueError("Pay period must be between 1 and 8 weeks.")
+        return weeks
 
     def _set_status(self, message: str, *, error: bool = False) -> None:
         self.status_label.configure(foreground=ERROR if error else PRIMARY)

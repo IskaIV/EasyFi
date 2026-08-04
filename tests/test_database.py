@@ -256,6 +256,76 @@ class DatabaseTests(unittest.TestCase):
             date(2026, 8, 3),
         )
 
+    def test_biweekly_payment_covers_two_week_pay_period_without_duplication(self) -> None:
+        source_id = self.database.add_income_source(
+            name="Biweekly employer",
+            hourly_rate_cents=32_500,
+            tax_rate_bps=0,
+            overtime_after_minutes=2400,
+            overtime_multiplier_milli=1500,
+        )
+        calculation = calculate_shift(
+            clock_in="09:00",
+            clock_out="10:00",
+            break_durations=(),
+            hourly_rate_cents=32_500,
+            tax_rate_bps=0,
+        )
+        for work_date in (date(2026, 7, 24), date(2026, 7, 31)):
+            self.database.save_shift(
+                ShiftToSave(
+                    income_source_id=source_id,
+                    work_date=work_date,
+                    clock_in="09:00",
+                    clock_out="10:00",
+                    break_durations=(),
+                    hourly_rate_cents=32_500,
+                    tax_rate_bps=0,
+                    overtime_after_minutes=2400,
+                    overtime_multiplier_milli=1500,
+                    calculation=calculation,
+                )
+            )
+
+        payment = PaymentToSave(
+            income_source_id=source_id,
+            paid_on=date(2026, 8, 3),
+            work_week_reference_date=date(2026, 8, 3),
+            amount_cents=65_000,
+            pay_period_weeks=2,
+        )
+        payment_id = self.database.save_payment(payment)
+
+        summary = self.database.payment_summary(
+            income_source_id=source_id,
+            reference_date=date(2026, 8, 3),
+            pay_period_weeks=2,
+        )
+        self.assertEqual(summary.week_start, date(2026, 7, 23))
+        self.assertEqual(summary.week_end, date(2026, 8, 5))
+        self.assertEqual(summary.pay_period_weeks, 2)
+        self.assertEqual(summary.gross_earned_cents, 65_000)
+        self.assertEqual(summary.payments_received_cents, 65_000)
+        self.assertEqual(summary.amount_owed_cents, 0)
+
+        one_week_view = self.database.payment_summary(
+            income_source_id=source_id,
+            reference_date=date(2026, 8, 3),
+            pay_period_weeks=1,
+        )
+        self.assertEqual(one_week_view.gross_earned_cents, 32_500)
+        self.assertEqual(one_week_view.payments_received_cents, 0)
+        self.assertEqual(self.database.get_payment(payment_id).pay_period_weeks, 2)
+        self.assertTrue(self.database.has_duplicate_payment(payment))
+
+        overview = self.database.overview_summary(
+            reference_date=date(2026, 8, 3),
+            income_source_id=source_id,
+        )
+        self.assertEqual(overview.payments_received_cents, 65_000)
+        self.assertEqual(overview.amount_owed_cents, 0)
+        self.assertEqual(overview.overpaid_cents, 0)
+
     def test_existing_payment_table_is_migrated(self) -> None:
         migrated_path = Path(self.temp_directory.name) / "migration-test.db"
         with closing(sqlite3.connect(migrated_path)) as connection:
@@ -279,6 +349,7 @@ class DatabaseTests(unittest.TestCase):
                 row[1] for row in connection.execute("PRAGMA table_info(payments)")
             }
         self.assertIn("work_week_reference_date", columns)
+        self.assertIn("pay_period_weeks", columns)
 
     def test_overview_aggregates_sources_without_offsetting_employer_balances(self) -> None:
         main_source = self.database.list_income_sources()[0]
