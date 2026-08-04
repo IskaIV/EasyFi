@@ -22,6 +22,8 @@ calculate its pay, save it to SQLite, and view it after restarting the app.
 - Payment records assigned to an income source and work week
 - Live gross-earned, employer-paid, amount-owed, and overpaid balances
 - Partial and multiple payments with edit, delete, and duplicate protection
+- Weekly Overview dashboard with source filters and previous-week comparisons
+- Per-employer hours, overtime, gross wages, payments, owed, and overpaid breakdown
 - No network requests, accounts, or cloud services
 
 Tax values are user-configured estimates and are not tax-filing advice.

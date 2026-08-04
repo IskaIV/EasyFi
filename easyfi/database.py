@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterator, Sequence
 
@@ -87,6 +87,40 @@ class PaymentSummary:
     payments_received_cents: int
     amount_owed_cents: int
     overpaid_cents: int
+
+
+@dataclass(frozen=True, slots=True)
+class OverviewSourceSummary:
+    income_source_id: int
+    source_name: str
+    paid_minutes: int
+    regular_minutes: int
+    overtime_minutes: int
+    gross_earned_cents: int
+    estimated_tax_cents: int
+    estimated_take_home_cents: int
+    payments_received_cents: int
+    amount_owed_cents: int
+    overpaid_cents: int
+
+
+@dataclass(frozen=True, slots=True)
+class OverviewSummary:
+    week_start: date
+    week_end: date
+    source_rows: tuple[OverviewSourceSummary, ...]
+    paid_minutes: int
+    regular_minutes: int
+    overtime_minutes: int
+    gross_earned_cents: int
+    estimated_tax_cents: int
+    estimated_take_home_cents: int
+    payments_received_cents: int
+    amount_owed_cents: int
+    overpaid_cents: int
+    previous_paid_minutes: int
+    previous_gross_earned_cents: int
+    previous_amount_owed_cents: int
 
 
 class Database:
@@ -609,6 +643,172 @@ class Database:
             amount_cents=int(row["amount_cents"]),
             notes=row["notes"],
         )
+
+    def overview_summary(
+        self,
+        *,
+        reference_date: date,
+        income_source_id: int | None = None,
+    ) -> OverviewSummary:
+        with self.connect() as connection:
+            start_weekday = self._get_setting_int(
+                connection, "work_week_start", 3
+            )
+            week_start, week_end = work_week_bounds(
+                reference_date, start_weekday
+            )
+            source_rows = self._overview_source_rows(
+                connection,
+                week_start,
+                week_end,
+                income_source_id=income_source_id,
+            )
+            previous_start = week_start - timedelta(days=7)
+            previous_end = week_end - timedelta(days=7)
+            previous_rows = self._overview_source_rows(
+                connection,
+                previous_start,
+                previous_end,
+                income_source_id=income_source_id,
+            )
+
+        return OverviewSummary(
+            week_start=week_start,
+            week_end=week_end,
+            source_rows=source_rows,
+            paid_minutes=sum(row.paid_minutes for row in source_rows),
+            regular_minutes=sum(row.regular_minutes for row in source_rows),
+            overtime_minutes=sum(row.overtime_minutes for row in source_rows),
+            gross_earned_cents=sum(
+                row.gross_earned_cents for row in source_rows
+            ),
+            estimated_tax_cents=sum(
+                row.estimated_tax_cents for row in source_rows
+            ),
+            estimated_take_home_cents=sum(
+                row.estimated_take_home_cents for row in source_rows
+            ),
+            payments_received_cents=sum(
+                row.payments_received_cents for row in source_rows
+            ),
+            amount_owed_cents=sum(
+                row.amount_owed_cents for row in source_rows
+            ),
+            overpaid_cents=sum(row.overpaid_cents for row in source_rows),
+            previous_paid_minutes=sum(
+                row.paid_minutes for row in previous_rows
+            ),
+            previous_gross_earned_cents=sum(
+                row.gross_earned_cents for row in previous_rows
+            ),
+            previous_amount_owed_cents=sum(
+                row.amount_owed_cents for row in previous_rows
+            ),
+        )
+
+    @staticmethod
+    def _overview_source_rows(
+        connection: sqlite3.Connection,
+        week_start: date,
+        week_end: date,
+        *,
+        income_source_id: int | None,
+    ) -> tuple[OverviewSourceSummary, ...]:
+        source_filter = ""
+        shift_parameters: list[object] = [
+            week_start.isoformat(),
+            week_end.isoformat(),
+        ]
+        payment_parameters: list[object] = [week_start.isoformat()]
+        if income_source_id is not None:
+            source_filter = " AND income_source_id = ?"
+            shift_parameters.append(income_source_id)
+            payment_parameters.append(income_source_id)
+
+        shift_rows = connection.execute(
+            f"""
+            SELECT income_source_id,
+                   COALESCE(SUM(paid_minutes), 0) AS paid_minutes,
+                   COALESCE(SUM(regular_minutes), 0) AS regular_minutes,
+                   COALESCE(SUM(overtime_minutes), 0) AS overtime_minutes,
+                   COALESCE(SUM(gross_pay_cents), 0) AS gross_earned_cents,
+                   COALESCE(SUM(tax_cents), 0) AS estimated_tax_cents,
+                   COALESCE(SUM(net_pay_cents), 0) AS estimated_take_home_cents
+            FROM shifts
+            WHERE work_date BETWEEN ? AND ?{source_filter}
+            GROUP BY income_source_id
+            """,
+            shift_parameters,
+        ).fetchall()
+        payment_rows = connection.execute(
+            f"""
+            SELECT income_source_id,
+                   COALESCE(SUM(amount_cents), 0) AS payments_received_cents
+            FROM payments
+            WHERE work_week_start = ?{source_filter}
+            GROUP BY income_source_id
+            """,
+            payment_parameters,
+        ).fetchall()
+
+        shifts = {int(row["income_source_id"]): row for row in shift_rows}
+        payments = {int(row["income_source_id"]): row for row in payment_rows}
+        source_ids = set(shifts) | set(payments)
+        if income_source_id is not None:
+            exists = connection.execute(
+                "SELECT 1 FROM income_sources WHERE id = ?",
+                (income_source_id,),
+            ).fetchone()
+            if exists is not None:
+                source_ids.add(income_source_id)
+        if not source_ids:
+            return ()
+
+        placeholders = ",".join("?" for _item in source_ids)
+        names = {
+            int(row["id"]): row["name"]
+            for row in connection.execute(
+                f"SELECT id, name FROM income_sources WHERE id IN ({placeholders})",
+                tuple(sorted(source_ids)),
+            ).fetchall()
+        }
+
+        result: list[OverviewSourceSummary] = []
+        for source_id in sorted(source_ids, key=lambda item: names.get(item, "").casefold()):
+            shift = shifts.get(source_id)
+            payment = payments.get(source_id)
+            gross = int(shift["gross_earned_cents"]) if shift is not None else 0
+            received = (
+                int(payment["payments_received_cents"])
+                if payment is not None
+                else 0
+            )
+            result.append(
+                OverviewSourceSummary(
+                    income_source_id=source_id,
+                    source_name=names.get(source_id, "Unknown source"),
+                    paid_minutes=int(shift["paid_minutes"]) if shift is not None else 0,
+                    regular_minutes=int(shift["regular_minutes"])
+                    if shift is not None
+                    else 0,
+                    overtime_minutes=int(shift["overtime_minutes"])
+                    if shift is not None
+                    else 0,
+                    gross_earned_cents=gross,
+                    estimated_tax_cents=int(shift["estimated_tax_cents"])
+                    if shift is not None
+                    else 0,
+                    estimated_take_home_cents=int(
+                        shift["estimated_take_home_cents"]
+                    )
+                    if shift is not None
+                    else 0,
+                    payments_received_cents=received,
+                    amount_owed_cents=max(gross - received, 0),
+                    overpaid_cents=max(received - gross, 0),
+                )
+            )
+        return tuple(result)
 
     def prior_paid_minutes(
         self,

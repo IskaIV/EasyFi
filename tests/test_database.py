@@ -280,6 +280,78 @@ class DatabaseTests(unittest.TestCase):
             }
         self.assertIn("work_week_reference_date", columns)
 
+    def test_overview_aggregates_sources_without_offsetting_employer_balances(self) -> None:
+        main_source = self.database.list_income_sources()[0]
+        self.database.save_shift(
+            self.make_shift(
+                work_date=date(2026, 7, 27),
+                clock_in="09:00",
+                clock_out="17:00",
+            )
+        )
+        self.database.save_shift(
+            self.make_shift(
+                work_date=date(2026, 8, 3),
+                clock_in="09:00",
+                clock_out="17:00",
+            )
+        )
+        second_source_id = self.database.add_income_source(
+            name="Second employer",
+            hourly_rate_cents=2000,
+            tax_rate_bps=0,
+            overtime_after_minutes=2400,
+            overtime_multiplier_milli=1500,
+        )
+        second_calculation = calculate_shift(
+            clock_in="09:00",
+            clock_out="14:00",
+            break_durations=(),
+            hourly_rate_cents=2000,
+            tax_rate_bps=0,
+        )
+        self.database.save_shift(
+            ShiftToSave(
+                income_source_id=second_source_id,
+                work_date=date(2026, 8, 4),
+                clock_in="09:00",
+                clock_out="14:00",
+                break_durations=(),
+                hourly_rate_cents=2000,
+                tax_rate_bps=0,
+                overtime_after_minutes=2400,
+                overtime_multiplier_milli=1500,
+                calculation=second_calculation,
+            )
+        )
+        self.database.save_payment(
+            PaymentToSave(
+                income_source_id=main_source.id,
+                paid_on=date(2026, 8, 6),
+                work_week_reference_date=date(2026, 8, 3),
+                amount_cents=20_000,
+            )
+        )
+
+        overview = self.database.overview_summary(reference_date=date(2026, 8, 3))
+        self.assertEqual(overview.paid_minutes, 780)
+        self.assertEqual(overview.gross_earned_cents, 29_200)
+        self.assertEqual(overview.payments_received_cents, 20_000)
+        self.assertEqual(overview.amount_owed_cents, 10_000)
+        self.assertEqual(overview.overpaid_cents, 800)
+        self.assertEqual(overview.previous_paid_minutes, 480)
+        self.assertEqual(overview.previous_gross_earned_cents, 19_200)
+        self.assertEqual(overview.previous_amount_owed_cents, 19_200)
+        self.assertEqual(len(overview.source_rows), 2)
+
+        main_only = self.database.overview_summary(
+            reference_date=date(2026, 8, 3),
+            income_source_id=main_source.id,
+        )
+        self.assertEqual(main_only.gross_earned_cents, 19_200)
+        self.assertEqual(main_only.amount_owed_cents, 0)
+        self.assertEqual(main_only.overpaid_cents, 800)
+
     def test_saved_shift_and_breaks_persist(self) -> None:
         source = self.database.list_income_sources()[0]
         calculation = calculate_shift(
