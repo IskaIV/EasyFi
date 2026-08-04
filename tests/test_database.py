@@ -256,30 +256,33 @@ class DatabaseTests(unittest.TestCase):
             date(2026, 8, 3),
         )
 
-    def test_biweekly_payment_covers_two_week_pay_period_without_duplication(self) -> None:
+    def test_biweekly_payment_is_applied_to_covered_weeks_oldest_first(self) -> None:
         source_id = self.database.add_income_source(
             name="Biweekly employer",
-            hourly_rate_cents=32_500,
+            hourly_rate_cents=25_000,
             tax_rate_bps=0,
             overtime_after_minutes=2400,
             overtime_multiplier_milli=1500,
         )
-        calculation = calculate_shift(
-            clock_in="09:00",
-            clock_out="10:00",
-            break_durations=(),
-            hourly_rate_cents=32_500,
-            tax_rate_bps=0,
-        )
-        for work_date in (date(2026, 7, 24), date(2026, 7, 31)):
+        for work_date, clock_out in (
+            (date(2026, 7, 24), "11:00"),
+            (date(2026, 7, 31), "10:00"),
+        ):
+            calculation = calculate_shift(
+                clock_in="09:00",
+                clock_out=clock_out,
+                break_durations=(),
+                hourly_rate_cents=25_000,
+                tax_rate_bps=0,
+            )
             self.database.save_shift(
                 ShiftToSave(
                     income_source_id=source_id,
                     work_date=work_date,
                     clock_in="09:00",
-                    clock_out="10:00",
+                    clock_out=clock_out,
                     break_durations=(),
-                    hourly_rate_cents=32_500,
+                    hourly_rate_cents=25_000,
                     tax_rate_bps=0,
                     overtime_after_minutes=2400,
                     overtime_multiplier_milli=1500,
@@ -304,27 +307,37 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(summary.week_start, date(2026, 7, 23))
         self.assertEqual(summary.week_end, date(2026, 8, 5))
         self.assertEqual(summary.pay_period_weeks, 2)
-        self.assertEqual(summary.gross_earned_cents, 65_000)
+        self.assertEqual(summary.gross_earned_cents, 75_000)
         self.assertEqual(summary.payments_received_cents, 65_000)
-        self.assertEqual(summary.amount_owed_cents, 0)
+        self.assertEqual(summary.amount_owed_cents, 10_000)
 
         one_week_view = self.database.payment_summary(
             income_source_id=source_id,
             reference_date=date(2026, 8, 3),
             pay_period_weeks=1,
         )
-        self.assertEqual(one_week_view.gross_earned_cents, 32_500)
+        self.assertEqual(one_week_view.gross_earned_cents, 25_000)
         self.assertEqual(one_week_view.payments_received_cents, 0)
         self.assertEqual(self.database.get_payment(payment_id).pay_period_weeks, 2)
         self.assertTrue(self.database.has_duplicate_payment(payment))
 
-        overview = self.database.overview_summary(
+        previous_overview = self.database.overview_summary(
+            reference_date=date(2026, 7, 24),
+            income_source_id=source_id,
+        )
+        self.assertEqual(previous_overview.gross_earned_cents, 50_000)
+        self.assertEqual(previous_overview.payments_received_cents, 50_000)
+        self.assertEqual(previous_overview.amount_owed_cents, 0)
+
+        current_overview = self.database.overview_summary(
             reference_date=date(2026, 8, 3),
             income_source_id=source_id,
         )
-        self.assertEqual(overview.payments_received_cents, 65_000)
-        self.assertEqual(overview.amount_owed_cents, 0)
-        self.assertEqual(overview.overpaid_cents, 0)
+        self.assertEqual(current_overview.gross_earned_cents, 25_000)
+        self.assertEqual(current_overview.payments_received_cents, 15_000)
+        self.assertEqual(current_overview.previous_amount_owed_cents, 0)
+        self.assertEqual(current_overview.amount_owed_cents, 10_000)
+        self.assertEqual(current_overview.overpaid_cents, 0)
 
     def test_existing_payment_table_is_migrated(self) -> None:
         migrated_path = Path(self.temp_directory.name) / "migration-test.db"

@@ -295,7 +295,7 @@ class OverviewPage(ttk.Frame):
         )
         self.payments_var.set(format_money(summary.payments_received_cents))
         self.payments_context_var.set(
-            "Employer deposits for pay periods ending this week"
+            "Pay-period payments applied to this week's wages"
         )
         self.owed_var.set(format_money(summary.amount_owed_cents))
         if summary.amount_owed_cents > 0:

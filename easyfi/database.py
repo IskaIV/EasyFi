@@ -930,15 +930,11 @@ class Database:
             week_start.isoformat(),
             week_end.isoformat(),
         ]
-        weekly_payment_parameters: list[object] = [week_start.isoformat()]
         cumulative_shift_parameters: list[object] = [week_end.isoformat()]
-        cumulative_payment_parameters: list[object] = [week_start.isoformat()]
         if income_source_id is not None:
             source_filter = " AND income_source_id = ?"
             weekly_shift_parameters.append(income_source_id)
-            weekly_payment_parameters.append(income_source_id)
             cumulative_shift_parameters.append(income_source_id)
-            cumulative_payment_parameters.append(income_source_id)
 
         shift_rows = connection.execute(
             f"""
@@ -955,17 +951,6 @@ class Database:
             """,
             weekly_shift_parameters,
         ).fetchall()
-        payment_rows = connection.execute(
-            f"""
-            SELECT income_source_id,
-                   COALESCE(SUM(amount_cents), 0) AS payments_received_cents
-            FROM payments
-            WHERE work_week_start = ?{source_filter}
-            GROUP BY income_source_id
-            """,
-            weekly_payment_parameters,
-        ).fetchall()
-
         cumulative_shift_rows = connection.execute(
             f"""
             SELECT income_source_id,
@@ -976,25 +961,24 @@ class Database:
             """,
             cumulative_shift_parameters,
         ).fetchall()
-        cumulative_payment_rows = connection.execute(
-            f"""
-            SELECT income_source_id,
-                   COALESCE(SUM(amount_cents), 0) AS payments_received_cents
-            FROM payments
-            WHERE work_week_start <= ?{source_filter}
-            GROUP BY income_source_id
-            """,
-            cumulative_payment_parameters,
-        ).fetchall()
-
         shifts = {int(row["income_source_id"]): row for row in shift_rows}
-        payments = {int(row["income_source_id"]): row for row in payment_rows}
         cumulative_shifts = {
             int(row["income_source_id"]): row for row in cumulative_shift_rows
         }
-        cumulative_payments = {
-            int(row["income_source_id"]): row for row in cumulative_payment_rows
-        }
+        payment_allocations = Database._payment_allocations_by_week(
+            connection,
+            start_weekday=week_start.weekday(),
+            income_source_id=income_source_id,
+        )
+        payments: dict[int, int] = {}
+        cumulative_payments: dict[int, int] = {}
+        for (source_id, allocated_week), amount_cents in payment_allocations.items():
+            if allocated_week == week_start:
+                payments[source_id] = payments.get(source_id, 0) + amount_cents
+            if allocated_week <= week_start:
+                cumulative_payments[source_id] = (
+                    cumulative_payments.get(source_id, 0) + amount_cents
+                )
         source_ids = (
             set(shifts)
             | set(payments)
@@ -1023,25 +1007,15 @@ class Database:
         result: list[OverviewSourceSummary] = []
         for source_id in sorted(source_ids, key=lambda item: names.get(item, "").casefold()):
             shift = shifts.get(source_id)
-            payment = payments.get(source_id)
             cumulative_shift = cumulative_shifts.get(source_id)
-            cumulative_payment = cumulative_payments.get(source_id)
             gross = int(shift["gross_earned_cents"]) if shift is not None else 0
-            received = (
-                int(payment["payments_received_cents"])
-                if payment is not None
-                else 0
-            )
+            received = payments.get(source_id, 0)
             cumulative_gross = (
                 int(cumulative_shift["gross_earned_cents"])
                 if cumulative_shift is not None
                 else 0
             )
-            cumulative_received = (
-                int(cumulative_payment["payments_received_cents"])
-                if cumulative_payment is not None
-                else 0
-            )
+            cumulative_received = cumulative_payments.get(source_id, 0)
             result.append(
                 OverviewSourceSummary(
                     income_source_id=source_id,
@@ -1072,6 +1046,79 @@ class Database:
                 )
             )
         return tuple(result)
+
+    @staticmethod
+    def _payment_allocations_by_week(
+        connection: sqlite3.Connection,
+        *,
+        start_weekday: int,
+        income_source_id: int | None,
+    ) -> dict[tuple[int, date], int]:
+        """Allocate each payment to covered weekly wages, oldest week first."""
+
+        source_clause = ""
+        payment_where = "WHERE work_week_start IS NOT NULL"
+        parameters: tuple[object, ...] = ()
+        if income_source_id is not None:
+            source_clause = " WHERE income_source_id = ?"
+            payment_where += " AND income_source_id = ?"
+            parameters = (income_source_id,)
+
+        shift_rows = connection.execute(
+            f"""
+            SELECT income_source_id, work_date, gross_pay_cents
+            FROM shifts{source_clause}
+            ORDER BY work_date, id
+            """,
+            parameters,
+        ).fetchall()
+        payment_rows = connection.execute(
+            f"""
+            SELECT id, income_source_id, work_week_start,
+                   pay_period_weeks, paid_on, amount_cents
+            FROM payments
+            {payment_where}
+            ORDER BY paid_on, id
+            """,
+            parameters,
+        ).fetchall()
+
+        gross_by_week: dict[tuple[int, date], int] = {}
+        for row in shift_rows:
+            source_id = int(row["income_source_id"])
+            work_date_value = date.fromisoformat(row["work_date"])
+            shift_week, _week_end = work_week_bounds(
+                work_date_value, start_weekday
+            )
+            key = (source_id, shift_week)
+            gross_by_week[key] = gross_by_week.get(key, 0) + int(
+                row["gross_pay_cents"]
+            )
+
+        allocations: dict[tuple[int, date], int] = {}
+        for row in payment_rows:
+            source_id = int(row["income_source_id"])
+            ending_week = date.fromisoformat(row["work_week_start"])
+            period_weeks = max(1, int(row["pay_period_weeks"]))
+            first_week = ending_week - timedelta(days=7 * (period_weeks - 1))
+            remaining = int(row["amount_cents"])
+            for week_offset in range(period_weeks):
+                covered_week = first_week + timedelta(days=7 * week_offset)
+                key = (source_id, covered_week)
+                unpaid_capacity = max(
+                    gross_by_week.get(key, 0) - allocations.get(key, 0), 0
+                )
+                applied = min(remaining, unpaid_capacity)
+                if applied:
+                    allocations[key] = allocations.get(key, 0) + applied
+                    remaining -= applied
+                if remaining == 0:
+                    break
+            if remaining:
+                ending_key = (source_id, ending_week)
+                allocations[ending_key] = allocations.get(ending_key, 0) + remaining
+
+        return allocations
 
     def prior_paid_minutes(
         self,

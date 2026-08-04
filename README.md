@@ -51,7 +51,8 @@ the wages earned during that week.
 For weekly, biweekly, or less frequent payroll, each payment can cover a pay
 period from 1 to 8 weeks. The selected date identifies the ending work week;
 EasyFi includes that week and the immediately preceding weeks in the pay-period
-comparison while counting the payment only once in the cumulative balance.
+comparison. Overview applies the payment to covered weekly wages from oldest to
+newest while counting the payment only once in the cumulative balance.
 
 > **Tax notice:** Tax percentages in EasyFi are user-configured estimates for
 > planning purposes. They are not tax-filing or financial advice.
