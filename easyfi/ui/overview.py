@@ -8,16 +8,8 @@ from tkinter import ttk
 
 from ..calculations import format_minutes, format_money
 from ..database import Database, IncomeSource, OverviewSummary
-
-
-WINDOW_BACKGROUND = "#F4F7F5"
-PANEL_BACKGROUND = "#FFFFFF"
-PRIMARY = "#17643C"
-TEXT = "#17211B"
-MUTED = "#627068"
-SOFT_GREEN = "#EEF6F0"
-ERROR = "#A53A3A"
-WARNING = "#9A6410"
+from .theme import MUTED, PANEL_BACKGROUND, TEXT
+from .widgets import DateInput, format_display_date, parse_display_date
 ALL_SOURCES = "All income sources"
 
 
@@ -27,7 +19,9 @@ class OverviewPage(ttk.Frame):
         self.database = database
         self.sources_by_label: dict[str, IncomeSource] = {}
 
-        self.reference_date_var = tk.StringVar(value=date.today().isoformat())
+        self.reference_date_var = tk.StringVar(
+            value=format_display_date(date.today())
+        )
         self.source_var = tk.StringVar(value=ALL_SOURCES)
         self.week_label_var = tk.StringVar()
         self.hours_var = tk.StringVar(value="0h 00m")
@@ -65,7 +59,7 @@ class OverviewPage(ttk.Frame):
         self._build_source_breakdown()
 
     def _build_controls(self) -> None:
-        controls = ttk.Frame(self, style="Panel.TFrame", padding=14)
+        controls = ttk.Frame(self, style="Card.TFrame", padding=14)
         controls.grid(row=1, column=0, sticky="ew")
         controls.columnconfigure(4, weight=1)
         ttk.Button(
@@ -78,7 +72,9 @@ class OverviewPage(ttk.Frame):
             controls,
             text="Today",
             style="Secondary.TButton",
-            command=lambda: self.reference_date_var.set(date.today().isoformat()),
+            command=lambda: self.reference_date_var.set(
+                format_display_date(date.today())
+            ),
         ).grid(row=0, column=1, padx=8)
         ttk.Button(
             controls,
@@ -86,7 +82,9 @@ class OverviewPage(ttk.Frame):
             style="Secondary.TButton",
             command=lambda: self.move_week(1),
         ).grid(row=0, column=2)
-        ttk.Entry(controls, textvariable=self.reference_date_var, width=13).grid(
+        DateInput(
+            controls, textvariable=self.reference_date_var, width=12
+        ).grid(
             row=0, column=3, padx=(12, 12)
         )
         ttk.Label(
@@ -141,7 +139,7 @@ class OverviewPage(ttk.Frame):
     ) -> None:
         left = 0 if column == 0 else 6
         right = 0 if column == 3 else 6
-        card = ttk.Frame(parent, style="Panel.TFrame", padding=16)
+        card = ttk.Frame(parent, style="Card.TFrame", padding=16)
         card.grid(row=0, column=column, sticky="nsew", padx=(left, right))
         ttk.Label(card, text=title, style="Field.TLabel").pack(anchor="w")
         tk.Label(
@@ -163,7 +161,7 @@ class OverviewPage(ttk.Frame):
         ).pack(fill="x")
 
     def _build_financial_details(self) -> None:
-        panel = ttk.Frame(self, style="Panel.TFrame", padding=(18, 13))
+        panel = ttk.Frame(self, style="Card.TFrame", padding=(18, 13))
         panel.grid(row=3, column=0, sticky="ew", pady=(16, 0))
         for column in range(3):
             panel.columnconfigure(column, weight=1)
@@ -183,7 +181,7 @@ class OverviewPage(ttk.Frame):
         )
 
     def _build_source_breakdown(self) -> None:
-        panel = ttk.Frame(self, style="Panel.TFrame", padding=18)
+        panel = ttk.Frame(self, style="Card.TFrame", padding=18)
         panel.grid(row=4, column=0, sticky="nsew", pady=(16, 0))
         panel.columnconfigure(0, weight=1)
         panel.rowconfigure(1, weight=1)
@@ -257,16 +255,16 @@ class OverviewPage(ttk.Frame):
 
     def move_week(self, direction: int) -> None:
         try:
-            reference = date.fromisoformat(self.reference_date_var.get().strip())
+            reference = parse_display_date(self.reference_date_var.get())
         except ValueError:
             reference = date.today()
         self.reference_date_var.set(
-            (reference + timedelta(days=7 * direction)).isoformat()
+            format_display_date(reference + timedelta(days=7 * direction))
         )
 
     def refresh_summary(self) -> None:
         try:
-            reference = date.fromisoformat(self.reference_date_var.get().strip())
+            reference = parse_display_date(self.reference_date_var.get())
         except ValueError:
             self.week_label_var.set("Work week: —")
             return
@@ -358,4 +356,3 @@ class OverviewPage(ttk.Frame):
             return "Same gross wages as previous week"
         direction = "more" if difference > 0 else "less"
         return f"{format_money(abs(difference))} {direction} than previous week"
-

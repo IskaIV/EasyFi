@@ -9,16 +9,8 @@ from tkinter import messagebox, ttk
 
 from ..calculations import format_money, work_week_bounds
 from ..database import Database, IncomeSource, PaymentSummary, PaymentToSave
-
-
-WINDOW_BACKGROUND = "#F4F7F5"
-PANEL_BACKGROUND = "#FFFFFF"
-PRIMARY = "#17643C"
-TEXT = "#17211B"
-MUTED = "#627068"
-SOFT_GREEN = "#EEF6F0"
-ERROR = "#A53A3A"
-WARNING = "#9A6410"
+from .theme import ERROR, MUTED, PANEL_BACKGROUND, PRIMARY, SOFT_GREEN, WARNING
+from .widgets import DateInput, format_display_date, parse_display_date
 
 
 class PaymentsPage(ttk.Frame):
@@ -30,9 +22,11 @@ class PaymentsPage(ttk.Frame):
 
         self.form_title_var = tk.StringVar(value="Record a payment")
         self.save_button_var = tk.StringVar(value="Add payment")
-        self.paid_on_var = tk.StringVar(value=date.today().isoformat())
+        self.paid_on_var = tk.StringVar(value=format_display_date(date.today()))
         self.source_var = tk.StringVar()
-        self.week_reference_var = tk.StringVar(value=date.today().isoformat())
+        self.week_reference_var = tk.StringVar(
+            value=format_display_date(date.today())
+        )
         self.week_label_var = tk.StringVar()
         self.amount_var = tk.StringVar()
         self.notes_var = tk.StringVar()
@@ -69,7 +63,7 @@ class PaymentsPage(ttk.Frame):
         self._build_payment_history()
 
     def _build_payment_form(self, parent: ttk.Frame) -> None:
-        panel = ttk.Frame(parent, style="Panel.TFrame", padding=20)
+        panel = ttk.Frame(parent, style="Card.TFrame", padding=20)
         panel.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         panel.columnconfigure(0, weight=1)
         panel.columnconfigure(1, weight=1)
@@ -79,7 +73,7 @@ class PaymentsPage(ttk.Frame):
 
         self._field_label(panel, "Date paid", 1, 0)
         self._field_label(panel, "Income source", 1, 1, left=8)
-        ttk.Entry(panel, textvariable=self.paid_on_var).grid(
+        DateInput(panel, textvariable=self.paid_on_var).grid(
             row=2, column=0, sticky="ew", padx=(0, 8)
         )
         self.source_combo = ttk.Combobox(
@@ -97,7 +91,7 @@ class PaymentsPage(ttk.Frame):
             style="Secondary.TButton",
             command=lambda: self.move_week(-1),
         ).grid(row=0, column=0, padx=(0, 8))
-        ttk.Entry(week_controls, textvariable=self.week_reference_var).grid(
+        DateInput(week_controls, textvariable=self.week_reference_var).grid(
             row=0, column=1, sticky="ew"
         )
         ttk.Button(
@@ -152,7 +146,7 @@ class PaymentsPage(ttk.Frame):
         ).grid(row=0, column=3)
 
     def _build_balance_summary(self, parent: ttk.Frame) -> None:
-        panel = ttk.Frame(parent, style="Panel.TFrame", padding=20)
+        panel = ttk.Frame(parent, style="Card.TFrame", padding=20)
         panel.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
         panel.columnconfigure(0, weight=1)
         ttk.Label(panel, text="Work-week balance", style="PanelTitle.TLabel").grid(
@@ -191,7 +185,7 @@ class PaymentsPage(ttk.Frame):
         ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(16, 0))
 
     def _build_payment_history(self) -> None:
-        panel = ttk.Frame(self, style="Panel.TFrame", padding=18)
+        panel = ttk.Frame(self, style="Card.TFrame", padding=18)
         panel.grid(row=2, column=0, sticky="nsew", pady=(18, 0))
         panel.columnconfigure(0, weight=1)
         panel.rowconfigure(1, weight=1)
@@ -291,17 +285,17 @@ class PaymentsPage(ttk.Frame):
 
     def move_week(self, direction: int) -> None:
         try:
-            reference = date.fromisoformat(self.week_reference_var.get().strip())
+            reference = parse_display_date(self.week_reference_var.get())
         except ValueError:
             reference = date.today()
         self.week_reference_var.set(
-            (reference + timedelta(days=7 * direction)).isoformat()
+            format_display_date(reference + timedelta(days=7 * direction))
         )
 
     def refresh_summary(self) -> None:
         try:
             source = self._selected_source_from_form()
-            reference = date.fromisoformat(self.week_reference_var.get().strip())
+            reference = parse_display_date(self.week_reference_var.get())
             summary = self.database.payment_summary(
                 income_source_id=source.id, reference_date=reference
             )
@@ -344,13 +338,13 @@ class PaymentsPage(ttk.Frame):
 
     def _payment_from_form(self) -> PaymentToSave:
         try:
-            paid_on = date.fromisoformat(self.paid_on_var.get().strip())
+            paid_on = parse_display_date(self.paid_on_var.get())
         except ValueError as exc:
-            raise ValueError("Date paid must use YYYY-MM-DD format.") from exc
+            raise ValueError("Date paid must use MM/DD/YYYY format.") from exc
         try:
-            reference_date = date.fromisoformat(self.week_reference_var.get().strip())
+            reference_date = parse_display_date(self.week_reference_var.get())
         except ValueError as exc:
-            raise ValueError("Work-week date must use YYYY-MM-DD format.") from exc
+            raise ValueError("Work-week date must use MM/DD/YYYY format.") from exc
         source = self._selected_source_from_form()
         try:
             amount_cents = int(
@@ -412,7 +406,7 @@ class PaymentsPage(ttk.Frame):
         self.form_title_var.set("Record a payment")
         self.save_button_var.set("Add payment")
         self.delete_form_button.configure(state="disabled")
-        self.paid_on_var.set(date.today().isoformat())
+        self.paid_on_var.set(format_display_date(date.today()))
         self.amount_var.set("")
         self.notes_var.set("")
         if preserve_context:
@@ -447,9 +441,11 @@ class PaymentsPage(ttk.Frame):
         self.form_title_var.set(f"Edit payment #{payment.id}")
         self.save_button_var.set("Save changes")
         self.delete_form_button.configure(state="normal")
-        self.paid_on_var.set(payment.paid_on.isoformat())
+        self.paid_on_var.set(format_display_date(payment.paid_on))
         self.source_var.set(source_label)
-        self.week_reference_var.set(payment.work_week_reference_date.isoformat())
+        self.week_reference_var.set(
+            format_display_date(payment.work_week_reference_date)
+        )
         self.amount_var.set(f"{payment.amount_cents / 100:.2f}")
         self.notes_var.set(payment.notes)
         self._set_status(f"Editing payment #{payment.id}.")
@@ -501,7 +497,7 @@ class PaymentsPage(ttk.Frame):
                 "end",
                 iid=str(payment.id),
                 values=(
-                    payment.paid_on.isoformat(),
+                    format_display_date(payment.paid_on),
                     payment.source_name,
                     f"{payment.work_week_start.strftime('%b %d')} – "
                     f"{week_end.strftime('%b %d, %Y')}",

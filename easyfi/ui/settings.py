@@ -10,17 +10,10 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from ..calculations import format_money, parse_clock_time
+from ..calculations import format_clock_time_12h, format_money, normalize_clock_time
 from ..database import Database, IncomeSource
-
-
-WINDOW_BACKGROUND = "#F4F7F5"
-PANEL_BACKGROUND = "#FFFFFF"
-PRIMARY = "#17643C"
-TEXT = "#17211B"
-MUTED = "#627068"
-SOFT_GREEN = "#EEF6F0"
-ERROR = "#A53A3A"
+from .theme import ERROR, MUTED, PANEL_BACKGROUND, PRIMARY
+from .widgets import TimeInput
 
 WEEKDAYS = (
     "Monday",
@@ -85,7 +78,7 @@ class SettingsPage(ttk.Frame):
         self._build_sources_panel()
 
     def _build_defaults_panel(self) -> None:
-        panel = ttk.Frame(self, style="Panel.TFrame", padding=18)
+        panel = ttk.Frame(self, style="Card.TFrame", padding=18)
         panel.grid(row=1, column=0, sticky="ew")
         for column in range(5):
             panel.columnconfigure(column, weight=1 if column < 4 else 0)
@@ -103,11 +96,11 @@ class SettingsPage(ttk.Frame):
         week_combo.grid(row=2, column=0, sticky="ew", padx=(0, 8))
 
         self._field_label(panel, "Default clock in", 1, 1)
-        ttk.Entry(panel, textvariable=self.default_clock_in_var).grid(
+        TimeInput(panel, textvariable=self.default_clock_in_var).grid(
             row=2, column=1, sticky="ew", padx=8
         )
         self._field_label(panel, "Default clock out", 1, 2)
-        ttk.Entry(panel, textvariable=self.default_clock_out_var).grid(
+        TimeInput(panel, textvariable=self.default_clock_out_var).grid(
             row=2, column=2, sticky="ew", padx=8
         )
         self._field_label(panel, "Default unpaid break", 1, 3)
@@ -133,7 +126,7 @@ class SettingsPage(ttk.Frame):
         ).grid(row=3, column=0, columnspan=5, sticky="w", pady=(10, 0))
 
     def _build_data_safety_panel(self) -> None:
-        panel = ttk.Frame(self, style="Panel.TFrame", padding=18)
+        panel = ttk.Frame(self, style="Card.TFrame", padding=18)
         panel.grid(row=2, column=0, sticky="ew", pady=(18, 0))
         panel.columnconfigure(0, weight=1)
 
@@ -215,7 +208,7 @@ class SettingsPage(ttk.Frame):
         )
 
     def _build_sources_panel(self) -> None:
-        panel = ttk.Frame(self, style="Panel.TFrame", padding=18)
+        panel = ttk.Frame(self, style="Card.TFrame", padding=18)
         panel.grid(row=3, column=0, sticky="nsew", pady=(18, 0))
         panel.columnconfigure(0, weight=3)
         panel.columnconfigure(1, weight=2)
@@ -362,10 +355,14 @@ class SettingsPage(ttk.Frame):
         week_start = self.database.get_setting_int("work_week_start", 3)
         self.week_start_var.set(WEEKDAYS[week_start] if 0 <= week_start <= 6 else "Thursday")
         self.default_clock_in_var.set(
-            self.database.get_setting("default_clock_in", "08:30")
+            format_clock_time_12h(
+                self.database.get_setting("default_clock_in", "08:30")
+            )
         )
         self.default_clock_out_var.set(
-            self.database.get_setting("default_clock_out", "17:00")
+            format_clock_time_12h(
+                self.database.get_setting("default_clock_out", "17:00")
+            )
         )
         self.default_break_var.set(
             self.database.get_setting("default_break_minutes", "30")
@@ -436,8 +433,8 @@ class SettingsPage(ttk.Frame):
                 "default_break_minutes": str(break_minutes),
             }
         )
-        self.default_clock_in_var.set(clock_in)
-        self.default_clock_out_var.set(clock_out)
+        self.default_clock_in_var.set(format_clock_time_12h(clock_in))
+        self.default_clock_out_var.set(format_clock_time_12h(clock_out))
         self.default_break_var.set(str(break_minutes))
         self._set_status("Timesheet defaults saved.")
         self.on_change()
@@ -652,9 +649,7 @@ class SettingsPage(ttk.Frame):
 
     @staticmethod
     def _normalize_time(value: str) -> str:
-        total = parse_clock_time(value)
-        hours, minutes = divmod(total, 60)
-        return f"{hours:02d}:{minutes:02d}"
+        return normalize_clock_time(value)
 
     @staticmethod
     def _scaled_decimal(value: str, scale: int) -> int:

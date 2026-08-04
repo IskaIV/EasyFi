@@ -6,7 +6,9 @@ from datetime import date
 from easyfi.calculations import (
     calculate_shift,
     elapsed_minutes,
+    format_clock_time_12h,
     format_money,
+    normalize_clock_time,
     work_week_bounds,
 )
 
@@ -14,6 +16,21 @@ from easyfi.calculations import (
 class TimeCalculationTests(unittest.TestCase):
     def test_elapsed_minutes_supports_overnight_shift(self) -> None:
         self.assertEqual(elapsed_minutes("22:30", "06:15"), 465)
+
+    def test_user_time_accepts_am_and_pm(self) -> None:
+        self.assertEqual(normalize_clock_time("8:30 am"), "08:30")
+        self.assertEqual(normalize_clock_time("12:00 PM"), "12:00")
+        self.assertEqual(normalize_clock_time("12:05 am"), "00:05")
+
+    def test_stored_time_formats_as_12_hour_display(self) -> None:
+        self.assertEqual(format_clock_time_12h("08:30"), "08:30 AM")
+        self.assertEqual(format_clock_time_12h("17:00"), "05:00 PM")
+
+    def test_user_time_rejects_invalid_12_hour_values(self) -> None:
+        with self.assertRaises(ValueError):
+            normalize_clock_time("13:00 PM")
+        with self.assertRaises(ValueError):
+            normalize_clock_time("09:60 AM")
 
     def test_thursday_work_week_contains_following_wednesday(self) -> None:
         start, end = work_week_bounds(date(2026, 8, 3), start_weekday=3)
@@ -70,4 +87,3 @@ class TimeCalculationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

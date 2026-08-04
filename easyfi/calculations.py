@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
+import re
 from typing import Iterable
 
 
@@ -43,6 +44,45 @@ def parse_clock_time(value: str) -> int:
     if not 0 <= hours <= 23 or not 0 <= minutes <= 59:
         raise ValueError("Time must be a valid 24-hour clock value.")
     return hours * MINUTES_PER_HOUR + minutes
+
+
+def normalize_clock_time(value: str) -> str:
+    """Normalize either 24-hour or 12-hour user input to stored HH:MM form."""
+
+    try:
+        match = re.fullmatch(
+            r"\s*(\d{1,2})\s*:\s*(\d{2})\s*(?:(AM|PM))?\s*",
+            value,
+            flags=re.IGNORECASE,
+        )
+    except TypeError as exc:
+        raise ValueError("Time must use HH:MM or HH:MM AM/PM format.") from exc
+    if match is None:
+        raise ValueError("Time must use HH:MM or HH:MM AM/PM format.")
+    hours = int(match.group(1))
+    minutes = int(match.group(2))
+    meridiem = match.group(3)
+    if not 0 <= minutes <= 59:
+        raise ValueError("Time must contain a valid minute value.")
+    if meridiem:
+        if not 1 <= hours <= 12:
+            raise ValueError("12-hour time must use an hour from 1 through 12.")
+        hours %= 12
+        if meridiem.upper() == "PM":
+            hours += 12
+    elif not 0 <= hours <= 23:
+        raise ValueError("24-hour time must use an hour from 0 through 23.")
+    return f"{hours:02d}:{minutes:02d}"
+
+
+def format_clock_time_12h(value: str) -> str:
+    """Format a stored 24-hour time for display, such as 05:00 PM."""
+
+    total_minutes = parse_clock_time(value)
+    hours, minutes = divmod(total_minutes, MINUTES_PER_HOUR)
+    meridiem = "AM" if hours < 12 else "PM"
+    display_hour = hours % 12 or 12
+    return f"{display_hour:02d}:{minutes:02d} {meridiem}"
 
 
 def elapsed_minutes(clock_in: str, clock_out: str) -> int:
@@ -149,4 +189,3 @@ def format_money(cents: int) -> str:
     absolute = abs(cents)
     dollars, remainder = divmod(absolute, 100)
     return f"{sign}${dollars:,}.{remainder:02d}"
-

@@ -11,28 +11,33 @@ from tkinter import messagebox, ttk
 from ..calculations import (
     ShiftCalculation,
     calculate_shift,
+    format_clock_time_12h,
     format_minutes,
     format_money,
-    parse_clock_time,
+    normalize_clock_time,
     work_week_bounds,
 )
 from ..database import Database, IncomeSource, ShiftToSave
 from .overview import OverviewPage
 from .payments import PaymentsPage
 from .settings import SettingsPage
-
-
-WINDOW_BACKGROUND = "#F4F7F5"
-PANEL_BACKGROUND = "#FFFFFF"
-SIDEBAR_BACKGROUND = "#183F2B"
-SIDEBAR_ACTIVE = "#2E5A40"
-PRIMARY = "#17643C"
-PRIMARY_HOVER = "#115332"
-TEXT = "#17211B"
-MUTED = "#627068"
-BORDER = "#D8E1DB"
-SOFT_GREEN = "#EEF6F0"
-ERROR = "#A53A3A"
+from .theme import (
+    BORDER,
+    ERROR,
+    FIELD_BACKGROUND,
+    MUTED,
+    PANEL_BACKGROUND,
+    PANEL_RAISED,
+    PRIMARY,
+    PRIMARY_HOVER,
+    PRIMARY_TEXT,
+    SIDEBAR_ACTIVE,
+    SIDEBAR_BACKGROUND,
+    SOFT_GREEN,
+    TEXT,
+    WINDOW_BACKGROUND,
+)
+from .widgets import DateInput, TimeInput, format_display_date, parse_display_date
 
 
 class TimesheetApp:
@@ -52,13 +57,17 @@ class TimesheetApp:
             value="Enter the times. EasyFi calculates the rest."
         )
         self.save_button_var = tk.StringVar(value="Add shift")
-        self.date_var = tk.StringVar(value=date.today().isoformat())
+        self.date_var = tk.StringVar(value=format_display_date(date.today()))
         self.source_var = tk.StringVar()
         self.clock_in_var = tk.StringVar(
-            value=self.database.get_setting("default_clock_in", "08:30")
+            value=format_clock_time_12h(
+                self.database.get_setting("default_clock_in", "08:30")
+            )
         )
         self.clock_out_var = tk.StringVar(
-            value=self.database.get_setting("default_clock_out", "17:00")
+            value=format_clock_time_12h(
+                self.database.get_setting("default_clock_out", "17:00")
+            )
         )
         self.rate_var = tk.StringVar(value="24.00")
         self.tax_var = tk.StringVar(value="18.00")
@@ -87,8 +96,8 @@ class TimesheetApp:
 
     def _configure_window(self) -> None:
         self.root.title("EasyFi")
-        self.root.geometry("1120x780")
-        self.root.minsize(900, 680)
+        self.root.geometry("1220x840")
+        self.root.minsize(1000, 720)
         self.root.configure(background=WINDOW_BACKGROUND)
         default_font = tkfont.nametofont("TkDefaultFont")
         default_font.configure(family="Segoe UI", size=10)
@@ -100,12 +109,26 @@ class TimesheetApp:
 
         style.configure("App.TFrame", background=WINDOW_BACKGROUND)
         style.configure("Panel.TFrame", background=PANEL_BACKGROUND)
+        style.configure(
+            "Card.TFrame",
+            background=PANEL_BACKGROUND,
+            bordercolor=BORDER,
+            borderwidth=1,
+            relief="solid",
+        )
+        style.configure(
+            "InputShell.TFrame",
+            background=FIELD_BACKGROUND,
+            bordercolor=BORDER,
+            borderwidth=1,
+            relief="solid",
+        )
         style.configure("Sidebar.TFrame", background=SIDEBAR_BACKGROUND)
         style.configure(
             "Title.TLabel",
             background=WINDOW_BACKGROUND,
             foreground=TEXT,
-            font=("Segoe UI", 20, "bold"),
+            font=("Segoe UI", 22, "bold"),
         )
         style.configure(
             "Subtitle.TLabel",
@@ -142,9 +165,10 @@ class TimesheetApp:
         style.configure(
             "Primary.TButton",
             background=PRIMARY,
-            foreground="#FFFFFF",
+            foreground=PRIMARY_TEXT,
             bordercolor=PRIMARY,
-            padding=(16, 9),
+            font=("Segoe UI", 10, "bold"),
+            padding=(17, 10),
         )
         style.map("Primary.TButton", background=[("active", PRIMARY_HOVER)])
         style.configure(
@@ -152,13 +176,20 @@ class TimesheetApp:
             background=PANEL_BACKGROUND,
             foreground=TEXT,
             bordercolor=BORDER,
+            lightcolor=BORDER,
+            darkcolor=BORDER,
             padding=(14, 8),
+        )
+        style.map(
+            "Secondary.TButton",
+            background=[("active", PANEL_RAISED)],
+            foreground=[("active", TEXT)],
         )
         style.configure(
             "Danger.TButton",
-            background="#FFFFFF",
+            background=PANEL_BACKGROUND,
             foreground=ERROR,
-            bordercolor="#D9B9B9",
+            bordercolor=BORDER,
             padding=(14, 8),
         )
         style.configure(
@@ -196,6 +227,79 @@ class TimesheetApp:
             foreground=TEXT,
             font=("Segoe UI", 9, "bold"),
             borderwidth=0,
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", SIDEBAR_ACTIVE)],
+            foreground=[("selected", TEXT)],
+        )
+        style.configure(
+            "TEntry",
+            fieldbackground=FIELD_BACKGROUND,
+            foreground=TEXT,
+            insertcolor=TEXT,
+            bordercolor=BORDER,
+            lightcolor=BORDER,
+            darkcolor=BORDER,
+            padding=(10, 8),
+        )
+        style.configure(
+            "Picker.TEntry",
+            fieldbackground=FIELD_BACKGROUND,
+            foreground=TEXT,
+            insertcolor=TEXT,
+            borderwidth=0,
+            padding=(10, 8),
+        )
+        style.configure(
+            "PickerIcon.TButton",
+            background=FIELD_BACKGROUND,
+            foreground=TEXT,
+            borderwidth=0,
+            padding=(4, 7),
+        )
+        style.map(
+            "PickerIcon.TButton",
+            background=[("active", PANEL_RAISED)],
+            foreground=[("active", PRIMARY)],
+        )
+        style.configure(
+            "TCombobox",
+            fieldbackground=FIELD_BACKGROUND,
+            background=FIELD_BACKGROUND,
+            foreground=TEXT,
+            arrowcolor=TEXT,
+            bordercolor=BORDER,
+            lightcolor=BORDER,
+            darkcolor=BORDER,
+            padding=(9, 7),
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", FIELD_BACKGROUND)],
+            foreground=[("readonly", TEXT)],
+            selectbackground=[("readonly", FIELD_BACKGROUND)],
+            selectforeground=[("readonly", TEXT)],
+        )
+        style.configure(
+            "TSpinbox",
+            fieldbackground=FIELD_BACKGROUND,
+            foreground=TEXT,
+            arrowcolor=TEXT,
+            bordercolor=BORDER,
+            padding=(8, 7),
+        )
+        style.configure(
+            "TCheckbutton",
+            background=PANEL_BACKGROUND,
+            foreground=TEXT,
+            indicatorcolor=FIELD_BACKGROUND,
+        )
+        style.map(
+            "TCheckbutton",
+            background=[("active", PANEL_BACKGROUND)],
+            foreground=[("active", TEXT)],
+            indicatorcolor=[("selected", PRIMARY)],
         )
 
     def _build_ui(self) -> None:
@@ -253,12 +357,12 @@ class TimesheetApp:
         self._build_recent_shifts(content)
 
     def _build_sidebar(self, parent: ttk.Frame) -> None:
-        sidebar = ttk.Frame(parent, style="Sidebar.TFrame", width=170, padding=(12, 20))
+        sidebar = ttk.Frame(parent, style="Sidebar.TFrame", width=190, padding=(14, 24))
         sidebar.grid(row=0, column=0, sticky="ns")
         sidebar.grid_propagate(False)
         brand = tk.Label(
             sidebar,
-            text="  EasyFi",
+            text="▣  EasyFi",
             font=("Segoe UI", 16, "bold"),
             background=SIDEBAR_BACKGROUND,
             foreground="#F1FFF5",
@@ -267,28 +371,28 @@ class TimesheetApp:
         brand.pack(fill="x", padx=6, pady=(0, 24))
         self.overview_nav_button = ttk.Button(
             sidebar,
-            text="Overview",
+            text="▦   Overview",
             style="Sidebar.TButton",
             command=lambda: self.show_page("overview"),
         )
         self.overview_nav_button.pack(fill="x", pady=2)
         self.timesheet_nav_button = ttk.Button(
             sidebar,
-            text="Timesheet",
+            text="◷   Timesheet",
             style="SidebarActive.TButton",
             command=lambda: self.show_page("timesheet"),
         )
         self.timesheet_nav_button.pack(fill="x", pady=2)
         self.payments_nav_button = ttk.Button(
             sidebar,
-            text="Payments",
+            text="▤   Payments",
             style="Sidebar.TButton",
             command=lambda: self.show_page("payments"),
         )
         self.payments_nav_button.pack(fill="x", pady=2)
         self.settings_nav_button = ttk.Button(
             sidebar,
-            text="Settings",
+            text="☷   Settings",
             style="Sidebar.TButton",
             command=lambda: self.show_page("settings"),
         )
@@ -337,7 +441,7 @@ class TimesheetApp:
         self.overview_page.refresh()
 
     def _build_shift_form(self, parent: ttk.Frame) -> None:
-        panel = ttk.Frame(parent, style="Panel.TFrame", padding=20)
+        panel = ttk.Frame(parent, style="Card.TFrame", padding=22)
         panel.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         panel.columnconfigure(0, weight=1)
         panel.columnconfigure(1, weight=1)
@@ -345,7 +449,12 @@ class TimesheetApp:
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 16)
         )
 
-        self._labeled_entry(panel, "Date worked", self.date_var, 1, 0)
+        date_frame = ttk.Frame(panel, style="Panel.TFrame")
+        date_frame.grid(row=1, column=0, sticky="ew")
+        ttk.Label(date_frame, text="Date worked", style="Field.TLabel").pack(
+            anchor="w", pady=(0, 6)
+        )
+        DateInput(date_frame, textvariable=self.date_var).pack(fill="x")
         source_frame = ttk.Frame(panel, style="Panel.TFrame")
         source_frame.grid(row=1, column=1, sticky="ew", padx=(8, 0))
         ttk.Label(source_frame, text="Income source", style="Field.TLabel").pack(
@@ -360,11 +469,21 @@ class TimesheetApp:
         time_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(16, 0))
         time_frame.columnconfigure(0, weight=1)
         time_frame.columnconfigure(2, weight=1)
-        self._labeled_entry(time_frame, "Clock in", self.clock_in_var, 0, 0)
+        clock_in_frame = ttk.Frame(time_frame, style="Panel.TFrame")
+        clock_in_frame.grid(row=0, column=0, sticky="ew")
+        ttk.Label(clock_in_frame, text="Clock in", style="Field.TLabel").pack(
+            anchor="w", pady=(0, 6)
+        )
+        TimeInput(clock_in_frame, textvariable=self.clock_in_var).pack(fill="x")
         ttk.Label(time_frame, text="→", style="Field.TLabel").grid(
             row=0, column=1, padx=12, pady=(22, 0)
         )
-        self._labeled_entry(time_frame, "Clock out", self.clock_out_var, 0, 2)
+        clock_out_frame = ttk.Frame(time_frame, style="Panel.TFrame")
+        clock_out_frame.grid(row=0, column=2, sticky="ew")
+        ttk.Label(clock_out_frame, text="Clock out", style="Field.TLabel").pack(
+            anchor="w", pady=(0, 6)
+        )
+        TimeInput(clock_out_frame, textvariable=self.clock_out_var).pack(fill="x")
 
         breaks_header = ttk.Frame(panel, style="Panel.TFrame")
         breaks_header.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(16, 5))
@@ -419,7 +538,7 @@ class TimesheetApp:
         ).grid(row=0, column=3)
 
     def _build_summary(self, parent: ttk.Frame) -> None:
-        panel = ttk.Frame(parent, style="Panel.TFrame", padding=20)
+        panel = ttk.Frame(parent, style="Card.TFrame", padding=22)
         panel.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
         panel.columnconfigure(0, weight=1)
         ttk.Label(panel, text="Live calculation", style="PanelTitle.TLabel").grid(
@@ -469,7 +588,7 @@ class TimesheetApp:
         note.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(15, 0))
 
     def _build_recent_shifts(self, parent: ttk.Frame) -> None:
-        panel = ttk.Frame(parent, style="Panel.TFrame", padding=18)
+        panel = ttk.Frame(parent, style="Card.TFrame", padding=18)
         panel.grid(row=2, column=0, sticky="nsew", pady=(18, 0))
         panel.columnconfigure(0, weight=1)
         panel.rowconfigure(1, weight=1)
@@ -635,9 +754,9 @@ class TimesheetApp:
         ShiftCalculation,
     ]:
         try:
-            work_date = date.fromisoformat(self.date_var.get().strip())
+            work_date = parse_display_date(self.date_var.get())
         except ValueError as exc:
-            raise ValueError("Date must use YYYY-MM-DD format.") from exc
+            raise ValueError("Date must use MM/DD/YYYY format.") from exc
 
         source = self.source_by_label.get(self.source_var.get())
         if source is None:
@@ -704,9 +823,7 @@ class TimesheetApp:
 
     @staticmethod
     def _normalize_clock_time(value: str) -> str:
-        minutes = parse_clock_time(value)
-        hours, remainder = divmod(minutes, 60)
-        return f"{hours:02d}:{remainder:02d}"
+        return normalize_clock_time(value)
 
     def _current_overtime_rules(self, source: IncomeSource) -> tuple[int, int]:
         if (
@@ -732,7 +849,7 @@ class TimesheetApp:
 
     def _refresh_week_label(self) -> None:
         try:
-            work_date = date.fromisoformat(self.date_var.get().strip())
+            work_date = parse_display_date(self.date_var.get())
             start_day = self.database.get_setting_int("work_week_start", 3)
             start, end = work_week_bounds(work_date, start_day)
         except ValueError:
@@ -842,12 +959,16 @@ class TimesheetApp:
         self.form_subtitle_var.set("Enter the times. EasyFi calculates the rest.")
         self.save_button_var.set("Add shift")
         self.delete_form_button.configure(state="disabled")
-        self.date_var.set(date.today().isoformat())
+        self.date_var.set(format_display_date(date.today()))
         self.clock_in_var.set(
-            self.database.get_setting("default_clock_in", "08:30")
+            format_clock_time_12h(
+                self.database.get_setting("default_clock_in", "08:30")
+            )
         )
         self.clock_out_var.set(
-            self.database.get_setting("default_clock_out", "17:00")
+            format_clock_time_12h(
+                self.database.get_setting("default_clock_out", "17:00")
+            )
         )
         for child in self.breaks_frame.winfo_children():
             child.destroy()
@@ -900,10 +1021,10 @@ class TimesheetApp:
         self.save_button_var.set("Save changes")
         self.delete_form_button.configure(state="normal")
 
-        self.date_var.set(shift.work_date.isoformat())
+        self.date_var.set(format_display_date(shift.work_date))
         self.source_var.set(source_label)
-        self.clock_in_var.set(shift.clock_in)
-        self.clock_out_var.set(shift.clock_out)
+        self.clock_in_var.set(format_clock_time_12h(shift.clock_in))
+        self.clock_out_var.set(format_clock_time_12h(shift.clock_out))
         self.rate_var.set(f"{shift.hourly_rate_cents / 100:.2f}")
         self.tax_var.set(f"{shift.tax_rate_bps / 100:.2f}")
         for child in self.breaks_frame.winfo_children():
@@ -975,9 +1096,10 @@ class TimesheetApp:
                 "end",
                 iid=str(shift["id"]),
                 values=(
-                    shift["work_date"],
+                    format_display_date(date.fromisoformat(shift["work_date"])),
                     shift["source_name"],
-                    f"{shift['clock_in']}–{shift['clock_out']}",
+                    f"{format_clock_time_12h(shift['clock_in'])} – "
+                    f"{format_clock_time_12h(shift['clock_out'])}",
                     format_minutes(shift["paid_minutes"]),
                     format_money(shift["gross_pay_cents"]),
                     format_money(shift["net_pay_cents"]),
