@@ -24,6 +24,9 @@ calculate its pay, save it to SQLite, and view it after restarting the app.
 - Partial and multiple payments with edit, delete, and duplicate protection
 - Weekly Overview dashboard with source filters and previous-week comparisons
 - Per-employer hours, overtime, gross wages, payments, owed, and overpaid breakdown
+- Verified manual backups and guarded restore with a pre-restore recovery copy
+- Daily automatic backups with configurable retention
+- SQLite integrity checks and complete CSV exports
 - No network requests, accounts, or cloud services
 
 Tax values are user-configured estimates and are not tax-filing advice.
@@ -54,6 +57,16 @@ different location for a run with:
 ```powershell
 python -m easyfi --data-dir C:\path\to\portable-data
 ```
+
+Automatic backups are enabled by default and stored in
+`%LOCALAPPDATA%\EasyFi\backups`. EasyFi creates at most one automatic backup per
+day and keeps the newest 10 copies by default. Both options can be changed under
+Settings → Data safety.
+
+Manual restores are verified before use. EasyFi creates a separate
+`easyfi-pre-restore-*.db` recovery copy of the current data before replacing it.
+CSV export creates a timestamped folder containing settings, income sources,
+shifts, breaks, and payments.
 
 ## Run tests
 

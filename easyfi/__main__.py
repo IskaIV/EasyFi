@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import sqlite3
+import sys
 from pathlib import Path
 
 from .database import Database
@@ -35,6 +37,11 @@ def main() -> None:
         print(f"EasyFi is ready. Database: {database.path}")
         return
 
+    try:
+        database.create_automatic_backup_if_due()
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        print(f"EasyFi automatic backup warning: {exc}", file=sys.stderr)
+
     from .ui.timesheet import launch
 
     launch(database)
@@ -42,4 +49,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

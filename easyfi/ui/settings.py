@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import tkinter as tk
+import sqlite3
 from collections.abc import Callable
+from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from tkinter import messagebox, ttk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 
 from ..calculations import format_money, parse_clock_time
 from ..database import Database, IncomeSource
@@ -55,13 +58,18 @@ class SettingsPage(ttk.Frame):
         self.source_form_title_var = tk.StringVar(value="Income source")
         self.archive_button_var = tk.StringVar(value="Archive selected")
         self.status_var = tk.StringVar()
+        self.automatic_backups_var = tk.BooleanVar(value=True)
+        self.backup_keep_count_var = tk.StringVar(value="10")
+        self.data_status_var = tk.StringVar()
+        self.database_location_var = tk.StringVar(value=str(self.database.path))
+        self.last_backup_var = tk.StringVar()
 
         self._build_ui()
         self.refresh()
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(2, weight=1)
+        self.rowconfigure(3, weight=1)
 
         header = ttk.Frame(self, style="App.TFrame")
         header.grid(row=0, column=0, sticky="ew", pady=(0, 18))
@@ -73,6 +81,7 @@ class SettingsPage(ttk.Frame):
         ).pack(anchor="w", pady=(3, 0))
 
         self._build_defaults_panel()
+        self._build_data_safety_panel()
         self._build_sources_panel()
 
     def _build_defaults_panel(self) -> None:
@@ -123,9 +132,91 @@ class SettingsPage(ttk.Frame):
             style="Field.TLabel",
         ).grid(row=3, column=0, columnspan=5, sticky="w", pady=(10, 0))
 
+    def _build_data_safety_panel(self) -> None:
+        panel = ttk.Frame(self, style="Panel.TFrame", padding=18)
+        panel.grid(row=2, column=0, sticky="ew", pady=(18, 0))
+        panel.columnconfigure(0, weight=1)
+
+        ttk.Label(panel, text="Data safety", style="PanelTitle.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 10)
+        )
+        backup_options = ttk.Frame(panel, style="Panel.TFrame")
+        backup_options.grid(row=0, column=1, sticky="e", pady=(0, 10))
+        ttk.Checkbutton(
+            backup_options,
+            text="Automatic daily backups",
+            variable=self.automatic_backups_var,
+        ).pack(side="left")
+        ttk.Label(backup_options, text="Keep", style="Field.TLabel").pack(
+            side="left", padx=(14, 5)
+        )
+        ttk.Entry(
+            backup_options, textvariable=self.backup_keep_count_var, width=5
+        ).pack(side="left")
+        ttk.Label(backup_options, text="copies", style="Field.TLabel").pack(
+            side="left", padx=(5, 10)
+        )
+        ttk.Button(
+            backup_options,
+            text="Save safety settings",
+            style="Secondary.TButton",
+            command=self.save_safety_settings,
+        ).pack(side="left")
+
+        actions = ttk.Frame(panel, style="Panel.TFrame")
+        actions.grid(row=1, column=0, columnspan=2, sticky="w")
+        ttk.Button(
+            actions,
+            text="Backup now",
+            style="Primary.TButton",
+            command=self.backup_now,
+        ).pack(side="left")
+        ttk.Button(
+            actions,
+            text="Restore backup",
+            style="Danger.TButton",
+            command=self.restore_backup,
+        ).pack(side="left", padx=8)
+        ttk.Button(
+            actions,
+            text="Export CSV",
+            style="Secondary.TButton",
+            command=self.export_csv,
+        ).pack(side="left", padx=(0, 8))
+        ttk.Button(
+            actions,
+            text="Check integrity",
+            style="Secondary.TButton",
+            command=self.check_integrity,
+        ).pack(side="left")
+
+        details = ttk.Frame(panel, style="Panel.TFrame")
+        details.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(9, 0))
+        details.columnconfigure(0, weight=1)
+        tk.Label(
+            details,
+            textvariable=self.database_location_var,
+            background=PANEL_BACKGROUND,
+            foreground=MUTED,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew")
+        ttk.Label(
+            details, textvariable=self.last_backup_var, style="Field.TLabel"
+        ).grid(row=0, column=1, sticky="e", padx=(12, 0))
+        self.data_status_label = tk.Label(
+            details,
+            textvariable=self.data_status_var,
+            background=PANEL_BACKGROUND,
+            foreground=PRIMARY,
+            anchor="w",
+        )
+        self.data_status_label.grid(
+            row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0)
+        )
+
     def _build_sources_panel(self) -> None:
         panel = ttk.Frame(self, style="Panel.TFrame", padding=18)
-        panel.grid(row=2, column=0, sticky="nsew", pady=(18, 0))
+        panel.grid(row=3, column=0, sticky="nsew", pady=(18, 0))
         panel.columnconfigure(0, weight=3)
         panel.columnconfigure(1, weight=2)
         panel.rowconfigure(1, weight=1)
@@ -157,7 +248,7 @@ class SettingsPage(ttk.Frame):
 
         columns = ("name", "rate", "tax", "overtime", "status")
         self.source_table = ttk.Treeview(
-            panel, columns=columns, show="headings", height=12
+            panel, columns=columns, show="headings", height=7
         )
         headings = {
             "name": "Name",
@@ -279,6 +370,19 @@ class SettingsPage(ttk.Frame):
         self.default_break_var.set(
             self.database.get_setting("default_break_minutes", "30")
         )
+        self.automatic_backups_var.set(
+            self.database.get_setting_int("automatic_backups_enabled", 1) == 1
+        )
+        self.backup_keep_count_var.set(
+            self.database.get_setting("automatic_backup_keep_count", "10")
+        )
+        self.database_location_var.set(f"Database: {self.database.path}")
+        last_backup = self.database.get_setting("last_automatic_backup", "")
+        self.last_backup_var.set(
+            f"Last automatic backup: {last_backup}"
+            if last_backup
+            else "No automatic backup created yet"
+        )
         self.refresh_sources()
 
     def refresh_sources(self, select_id: int | None = None) -> None:
@@ -337,6 +441,97 @@ class SettingsPage(ttk.Frame):
         self.default_break_var.set(str(break_minutes))
         self._set_status("Timesheet defaults saved.")
         self.on_change()
+
+    def save_safety_settings(self) -> None:
+        try:
+            keep_count = int(self.backup_keep_count_var.get().strip())
+            if not 1 <= keep_count <= 100:
+                raise ValueError
+        except ValueError:
+            self._set_data_status(
+                "Backup retention must be between 1 and 100 copies.", error=True
+            )
+            return
+        self.database.update_settings(
+            {
+                "automatic_backups_enabled": (
+                    "1" if self.automatic_backups_var.get() else "0"
+                ),
+                "automatic_backup_keep_count": str(keep_count),
+            }
+        )
+        self.backup_keep_count_var.set(str(keep_count))
+        self._set_data_status("Automatic-backup settings saved.")
+
+    def backup_now(self) -> None:
+        backup_directory = self.database.automatic_backup_directory()
+        backup_directory.mkdir(parents=True, exist_ok=True)
+        destination = filedialog.asksaveasfilename(
+            parent=self.winfo_toplevel(),
+            title="Save EasyFi backup",
+            initialdir=str(backup_directory),
+            initialfile=f"easyfi-manual-{date.today().isoformat()}.db",
+            defaultextension=".db",
+            filetypes=(("EasyFi database", "*.db"), ("All files", "*.*")),
+        )
+        if not destination:
+            return
+        try:
+            saved = self.database.backup_to(Path(destination))
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            self._set_data_status(str(exc), error=True)
+            return
+        self._set_data_status(f"Verified backup saved: {saved}")
+
+    def restore_backup(self) -> None:
+        source = filedialog.askopenfilename(
+            parent=self.winfo_toplevel(),
+            title="Choose an EasyFi backup",
+            initialdir=str(self.database.automatic_backup_directory()),
+            filetypes=(("EasyFi database", "*.db"), ("All files", "*.*")),
+        )
+        if not source:
+            return
+        valid, result = self.database.integrity_check(Path(source))
+        if not valid:
+            self._set_data_status(f"Restore rejected: {result}", error=True)
+            return
+        if not messagebox.askyesno(
+            "Restore EasyFi backup?",
+            "Restoring replaces the current EasyFi data. A verified recovery "
+            "copy of the current database will be created first. Continue?",
+            icon="warning",
+            parent=self.winfo_toplevel(),
+        ):
+            return
+        try:
+            safety_backup = self.database.restore_from(Path(source))
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            self._set_data_status(str(exc), error=True)
+            return
+        self.on_change()
+        self.refresh()
+        self._set_data_status(
+            f"Backup restored. Previous data preserved at: {safety_backup}"
+        )
+
+    def export_csv(self) -> None:
+        destination = filedialog.askdirectory(
+            parent=self.winfo_toplevel(),
+            title="Choose a folder for the EasyFi CSV export",
+        )
+        if not destination:
+            return
+        try:
+            export_directory = self.database.export_csv(Path(destination))
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            self._set_data_status(str(exc), error=True)
+            return
+        self._set_data_status(f"CSV export created: {export_directory}")
+
+    def check_integrity(self) -> None:
+        valid, result = self.database.integrity_check()
+        self._set_data_status(result, error=not valid)
 
     def start_new_source(self) -> None:
         self.editing_source_id = None
@@ -478,3 +673,7 @@ class SettingsPage(ttk.Frame):
     def _set_status(self, message: str, *, error: bool = False) -> None:
         self.status_label.configure(foreground=ERROR if error else PRIMARY)
         self.status_var.set(message)
+
+    def _set_data_status(self, message: str, *, error: bool = False) -> None:
+        self.data_status_label.configure(foreground=ERROR if error else PRIMARY)
+        self.data_status_var.set(message)

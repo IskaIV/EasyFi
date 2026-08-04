@@ -352,6 +352,80 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(main_only.amount_owed_cents, 0)
         self.assertEqual(main_only.overpaid_cents, 800)
 
+    def test_verified_backup_and_restore_preserve_recoverable_copy(self) -> None:
+        backup_path = Path(self.temp_directory.name) / "manual-backup.db"
+        self.database.backup_to(backup_path)
+        self.assertTrue(backup_path.exists())
+        self.assertEqual(self.database.integrity_check(backup_path), (True, "Integrity check passed."))
+
+        added_id = self.database.add_income_source(
+            name="Temporary source",
+            hourly_rate_cents=3000,
+            tax_rate_bps=0,
+            overtime_after_minutes=2400,
+            overtime_multiplier_milli=1500,
+        )
+        self.assertIn(
+            added_id,
+            [source.id for source in self.database.list_income_sources()],
+        )
+
+        safety_backup = self.database.restore_from(backup_path)
+        self.assertTrue(safety_backup.exists())
+        self.assertEqual(self.database.integrity_check()[0], True)
+        self.assertNotIn(
+            "Temporary source",
+            [source.name for source in self.database.list_income_sources()],
+        )
+        safety_database = Database(safety_backup)
+        self.assertIn(
+            "Temporary source",
+            [source.name for source in safety_database.list_income_sources()],
+        )
+
+    def test_csv_export_contains_all_data_tables(self) -> None:
+        export_root = Path(self.temp_directory.name) / "exports"
+        export_directory = self.database.export_csv(export_root)
+        expected = {
+            "settings.csv",
+            "income_sources.csv",
+            "shifts.csv",
+            "shift_breaks.csv",
+            "payments.csv",
+        }
+        self.assertEqual(
+            {item.name for item in export_directory.iterdir()}, expected
+        )
+        source_export = (export_directory / "income_sources.csv").read_text(
+            encoding="utf-8-sig"
+        )
+        self.assertIn("Main job", source_export)
+
+    def test_automatic_backups_rotate_to_configured_retention(self) -> None:
+        self.database.update_settings(
+            {
+                "automatic_backups_enabled": "1",
+                "automatic_backup_keep_count": "2",
+                "last_automatic_backup": "",
+            }
+        )
+        for _index in range(3):
+            backup = self.database.create_automatic_backup_if_due()
+            self.assertIsNotNone(backup)
+            self.database.update_settings({"last_automatic_backup": ""})
+        backups = list(
+            self.database.automatic_backup_directory().glob("easyfi-auto-*.db")
+        )
+        self.assertEqual(len(backups), 2)
+        self.assertTrue(all(self.database.integrity_check(item)[0] for item in backups))
+
+    def test_restore_rejects_non_easyfi_database(self) -> None:
+        unrelated = Path(self.temp_directory.name) / "unrelated.db"
+        with closing(sqlite3.connect(unrelated)) as connection:
+            connection.execute("CREATE TABLE something_else(id INTEGER PRIMARY KEY)")
+        with self.assertRaisesRegex(ValueError, "Restore rejected"):
+            self.database.restore_from(unrelated)
+
     def test_saved_shift_and_breaks_persist(self) -> None:
         source = self.database.list_income_sources()[0]
         calculation = calculate_shift(

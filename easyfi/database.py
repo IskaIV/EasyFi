@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import csv
+import os
 import sqlite3
-from contextlib import contextmanager
+import tempfile
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -220,6 +223,9 @@ class Database:
                 "default_clock_in": "08:30",
                 "default_clock_out": "17:00",
                 "default_break_minutes": "30",
+                "automatic_backups_enabled": "1",
+                "automatic_backup_keep_count": "10",
+                "last_automatic_backup": "",
             }
             connection.executemany(
                 "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)",
@@ -261,6 +267,9 @@ class Database:
             "default_clock_in",
             "default_clock_out",
             "default_break_minutes",
+            "automatic_backups_enabled",
+            "automatic_backup_keep_count",
+            "last_automatic_backup",
         }
         unknown = set(values) - allowed
         if unknown:
@@ -282,6 +291,178 @@ class Database:
             if new_week_start != old_week_start:
                 self._recalculate_all_shifts(connection)
                 self._realign_payments(connection, new_week_start)
+
+    def integrity_check(self, path: Path | None = None) -> tuple[bool, str]:
+        target = Path(path) if path is not None else self.path
+        if not target.exists() or not target.is_file():
+            return False, "Database file does not exist."
+        try:
+            with closing(sqlite3.connect(target)) as connection:
+                results = [
+                    str(row[0])
+                    for row in connection.execute("PRAGMA integrity_check").fetchall()
+                ]
+                tables = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    ).fetchall()
+                }
+        except sqlite3.Error as exc:
+            return False, f"SQLite could not read the file: {exc}"
+        if results != ["ok"]:
+            return False, "; ".join(results)
+        required = {"settings", "income_sources", "shifts", "shift_breaks", "payments"}
+        missing = sorted(required - tables)
+        if missing:
+            return False, f"Not an EasyFi database; missing table: {missing[0]}."
+        return True, "Integrity check passed."
+
+    def backup_to(self, destination: Path) -> Path:
+        destination = Path(destination).expanduser().resolve()
+        source = self.path.expanduser().resolve()
+        if destination == source:
+            raise ValueError("Choose a backup location different from the live database.")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self._temporary_database_path(destination.parent, "backup-")
+        try:
+            self._copy_database(source, temporary)
+            valid, message = self.integrity_check(temporary)
+            if not valid:
+                raise ValueError(f"Backup verification failed: {message}")
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return destination
+
+    def restore_from(self, source: Path) -> Path:
+        source = Path(source).expanduser().resolve()
+        live_database = self.path.expanduser().resolve()
+        if source == live_database:
+            raise ValueError("The selected file is already the live EasyFi database.")
+        valid, message = self.integrity_check(source)
+        if not valid:
+            raise ValueError(f"Restore rejected: {message}")
+
+        safety_directory = self.automatic_backup_directory()
+        safety_directory.mkdir(parents=True, exist_ok=True)
+        safety_backup = safety_directory / self._timestamped_name("easyfi-pre-restore")
+        self.backup_to(safety_backup)
+
+        live_database.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self._temporary_database_path(live_database.parent, "restore-")
+        try:
+            self._copy_database(source, temporary)
+            restored_database = Database(temporary)
+            restored_database.initialize()
+            valid, message = restored_database.integrity_check()
+            if not valid:
+                raise ValueError(f"Restored database verification failed: {message}")
+            os.replace(temporary, live_database)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return safety_backup
+
+    def export_csv(self, destination_directory: Path) -> Path:
+        destination_directory = Path(destination_directory).expanduser().resolve()
+        destination_directory.mkdir(parents=True, exist_ok=True)
+        export_directory = destination_directory / datetime.now().strftime(
+            "EasyFi-export-%Y%m%d-%H%M%S-%f"
+        )
+        export_directory.mkdir(parents=False, exist_ok=False)
+        queries = {
+            "settings.csv": "SELECT key, value FROM settings ORDER BY key",
+            "income_sources.csv": """
+                SELECT id, name, hourly_rate_cents, tax_rate_bps,
+                       overtime_after_minutes, overtime_multiplier_milli,
+                       active, created_at
+                FROM income_sources ORDER BY name COLLATE NOCASE
+            """,
+            "shifts.csv": """
+                SELECT shifts.*, income_sources.name AS income_source_name
+                FROM shifts
+                JOIN income_sources ON income_sources.id = shifts.income_source_id
+                ORDER BY work_date, clock_in, shifts.id
+            """,
+            "shift_breaks.csv": """
+                SELECT shift_breaks.* FROM shift_breaks
+                ORDER BY shift_id, sort_order, id
+            """,
+            "payments.csv": """
+                SELECT payments.*, income_sources.name AS income_source_name
+                FROM payments
+                JOIN income_sources ON income_sources.id = payments.income_source_id
+                ORDER BY paid_on, payments.id
+            """,
+        }
+        try:
+            with self.connect() as connection:
+                for filename, query in queries.items():
+                    cursor = connection.execute(query)
+                    headers = [item[0] for item in cursor.description]
+                    with (export_directory / filename).open(
+                        "w", newline="", encoding="utf-8-sig"
+                    ) as output:
+                        writer = csv.writer(output)
+                        writer.writerow(headers)
+                        writer.writerows(cursor.fetchall())
+        except Exception:
+            for exported_file in export_directory.glob("*.csv"):
+                exported_file.unlink(missing_ok=True)
+            export_directory.rmdir()
+            raise
+        return export_directory
+
+    def automatic_backup_directory(self) -> Path:
+        return self.path.parent / "backups"
+
+    def create_automatic_backup_if_due(self) -> Path | None:
+        if self.get_setting_int("automatic_backups_enabled", 1) != 1:
+            return None
+        today = date.today().isoformat()
+        if self.get_setting("last_automatic_backup", "") == today:
+            return None
+        backup_directory = self.automatic_backup_directory()
+        backup_directory.mkdir(parents=True, exist_ok=True)
+        destination = backup_directory / self._timestamped_name("easyfi-auto")
+        self.backup_to(destination)
+        self.update_settings({"last_automatic_backup": today})
+        keep_count = min(
+            100,
+            max(1, self.get_setting_int("automatic_backup_keep_count", 10)),
+        )
+        backups = sorted(
+            backup_directory.glob("easyfi-auto-*.db"),
+            key=lambda item: item.stat().st_mtime_ns,
+            reverse=True,
+        )
+        for expired in backups[keep_count:]:
+            expired.unlink(missing_ok=True)
+        return destination
+
+    @staticmethod
+    def _copy_database(source: Path, destination: Path) -> None:
+        if not source.exists():
+            raise ValueError("Database file does not exist.")
+        with closing(sqlite3.connect(source)) as source_connection:
+            with closing(sqlite3.connect(destination)) as destination_connection:
+                source_connection.backup(destination_connection)
+                destination_connection.commit()
+
+    @staticmethod
+    def _temporary_database_path(directory: Path, prefix: str) -> Path:
+        handle = tempfile.NamedTemporaryFile(
+            prefix=prefix,
+            suffix=".db.tmp",
+            dir=directory,
+            delete=False,
+        )
+        handle.close()
+        return Path(handle.name)
+
+    @staticmethod
+    def _timestamped_name(prefix: str) -> str:
+        return datetime.now().strftime(f"{prefix}-%Y%m%d-%H%M%S-%f.db")
 
     def list_income_sources(
         self, *, include_inactive: bool = False
