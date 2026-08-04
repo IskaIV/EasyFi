@@ -1,0 +1,13 @@
+.venv-broken/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.db
+*.db-shm
+*.db-wal
+.pytest_cache/
+.coverage
+build/
+dist/
+*.egg-info/

@@ -1,0 +1,2 @@
+"""EasyFi desktop user interface."""
+
