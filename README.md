@@ -80,6 +80,20 @@ shifts, breaks, and payments.
 python -m unittest discover -s tests -v
 ```
 
+## Build the Windows executable
+
+Install the free build dependency once, then run the reproducible build script:
+
+```powershell
+python -m pip install ".[build]"
+.\packaging\build.ps1
+```
+
+The standalone, windowed application is created at `dist\EasyFi.exe`. It does
+not require Python on the computer where it runs. The executable embeds the DPI
+manifest and version metadata; personal data remains outside the executable at
+`%LOCALAPPDATA%\EasyFi`.
+
 ## Data model
 
 - `settings`: work-week, clock-time, break, and currency preferences
